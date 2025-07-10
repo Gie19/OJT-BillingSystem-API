@@ -1,20 +1,21 @@
+require('dotenv').config();  // ✅ Load .env variables
+
 const mysql = require('mysql');
 
 const connection = mysql.createConnection({
-  host: 'localhost',     
-  user: 'root',         
-  password: '',
-  database: 'meterreading',
-  port: 3306               
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  port: process.env.DB_PORT
 });
 
 connection.connect((err) => {
   if (err) {
     console.error('Connection error:', err.stack);
-    return this.resume.status(500).json({ error: err.message });
+    return;
   }
   console.log('Connected to MySQL as ID', connection.threadId);
 });
-
 
 module.exports = connection;
