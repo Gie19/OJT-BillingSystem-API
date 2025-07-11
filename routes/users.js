@@ -2,13 +2,18 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const util = require('util');
-const hashPassword = require('../utils/hashPassword');
+const { hashPassword } = require('../utils/hashPassword');
+const authenticateToken = require('../middleware/authenticateToken');
+const authorizeRole = require('../middleware/authorizeRole');
+
 
 const query = util.promisify(db.query).bind(db);
 
+// All routes below require valid token
+router.use(authenticateToken);
 
 // GET ALL USERS
-router.get('/', async (req, res) => {
+router.get('/', authorizeRole('admin'), async (req, res) => {
   try {
     const results = await query('SELECT * FROM useraccounts');
     res.json(results);
@@ -20,7 +25,7 @@ router.get('/', async (req, res) => {
 
 
 // GET USER BY ID
-router.get('/:id', async (req, res) => {
+router.get('/:id', authorizeRole('admin'), async (req, res) => {
   const userId = req.params.id;
   try {
     const results = await query('SELECT * FROM useraccounts WHERE user_id = ?', [userId]);
@@ -38,7 +43,7 @@ router.get('/:id', async (req, res) => {
 
 
 // CREATE NEW USER WITH PREFIXED ID
-router.post('/', async (req, res) => {
+router.post('/',authorizeRole('admin'), async (req, res) => {
   const { user_password, user_fullname, user_level, building_name } = req.body;
 
   if (!user_password || !user_fullname || !user_level || !building_name) {
@@ -95,7 +100,7 @@ router.post('/', async (req, res) => {
 
 
 // DELETE USER BY ID
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   const userId = req.params.id;
 
   if (!userId) {
@@ -119,7 +124,7 @@ router.delete('/:id', async (req, res) => {
 
 
 // UPDATE USER BY ID
-router.put('/:id', async (req, res) => {
+router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const userId = req.params.id;
   const { user_password, user_fullname, user_level, building_name } = req.body;
 
