@@ -1,52 +1,50 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const bcrypt = require('bcrypt');
+const util = require('util');
+const hashPassword = require('../utils/hashPassword');
+
+const query = util.promisify(db.query).bind(db);
 
 
-//GET ALL USERS IN THE TABLE
-router.get('/', (req, res) => {
-  const sql = 'SELECT * FROM useraccounts';
-
-  db.query(sql, (err, results) => {
-    if (err) {
-      console.error('Database error:', err);
-      return res.status(500).json({ error: err.message });
-    }
-
+// GET ALL USERS
+router.get('/', async (req, res) => {
+  try {
+    const results = await query('SELECT * FROM useraccounts');
     res.json(results);
-  });
+  } catch (err) {
+    console.error('Database error:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-//GET USER BY ID
-router.get('/:id', (req, res) => {
-  const userId = req.params.id;
-  const sql = 'SELECT * FROM useraccounts WHERE user_id = ?';
 
-  db.query(sql, [userId], (err, results) => {
-    if (err) {
-      console.error('Database error:', err);
-      return res.status(500).json({ error: err.message });
-    }
+// GET USER BY ID
+router.get('/:id', async (req, res) => {
+  const userId = req.params.id;
+  try {
+    const results = await query('SELECT * FROM useraccounts WHERE user_id = ?', [userId]);
 
     if (results.length === 0) {
       return res.status(404).json({ message: 'User not found' });
     }
 
     res.json(results[0]);
-  });
+  } catch (err) {
+    console.error('Database error:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-//CREATE A NEW USER WITH AUTO INCREMENTING ID
-// ID will be prefixed with 'A' for admin and 'P' for personnel
-router.post('/', (req, res) => {
+
+// CREATE NEW USER WITH PREFIXED ID
+router.post('/', async (req, res) => {
   const { user_password, user_fullname, user_level, building_name } = req.body;
 
   if (!user_password || !user_fullname || !user_level || !building_name) {
     return res.status(400).json({ error: 'All fields are required' });
   }
 
-  // Choose prefix based on level
   let prefix;
   if (user_level.toLowerCase() === 'admin') {
     prefix = 'A';
@@ -56,19 +54,15 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: 'Invalid user level' });
   }
 
-  // Find highest existing ID with that prefix
-  const sqlFind = `
-    SELECT user_id FROM useraccounts
-    WHERE user_id LIKE ?
-    ORDER BY CAST(SUBSTRING(user_id, 2) AS UNSIGNED) DESC
-    LIMIT 1
-  `;
-
-  db.query(sqlFind, [`${prefix}%`], (err, results) => {
-    if (err) {
-      console.error('Database error:', err);
-      return res.status(500).json({ error: err.message });
-    }
+  try {
+    // Get highest existing ID for this prefix
+    const sqlFind = `
+      SELECT user_id FROM useraccounts
+      WHERE user_id LIKE ?
+      ORDER BY CAST(SUBSTRING(user_id, 2) AS UNSIGNED) DESC
+      LIMIT 1
+    `;
+    const results = await query(sqlFind, [`${prefix}%`]);
 
     let nextNumber = 1;
     if (results.length > 0) {
@@ -79,125 +73,90 @@ router.post('/', (req, res) => {
 
     const newUserId = `${prefix}${nextNumber}`;
 
-    // Now hash password
-    const saltRounds = 10;
-    bcrypt.hash(user_password, saltRounds, (err, hashedPassword) => {
-      if (err) {
-        console.error('Hash error:', err);
-        return res.status(500).json({ error: 'Error hashing password' });
-      }
+    // Hash password
+    const hashedPassword = await hashPassword(user_password);
 
-      const sqlInsert = `
-        INSERT INTO useraccounts (user_id, user_password, user_fullname, user_level, building_name)
-        VALUES (?, ?, ?, ?, ?)
-      `;
+    // Insert new user
+    const sqlInsert = `
+      INSERT INTO useraccounts (user_id, user_password, user_fullname, user_level, building_name)
+      VALUES (?, ?, ?, ?, ?)
+    `;
+    await query(sqlInsert, [newUserId, hashedPassword, user_fullname, user_level, building_name]);
 
-      db.query(sqlInsert, [newUserId, hashedPassword, user_fullname, user_level, building_name], (err, results) => {
-        if (err) {
-          console.error('Database error:', err);
-          return res.status(500).json({ error: err.message });
-        }
-
-        res.status(201).json({
-          message: 'User created successfully',
-          userId: newUserId
-        });
-      });
+    res.status(201).json({
+      message: 'User created successfully',
+      userId: newUserId
     });
-  });
+  } catch (err) {
+    console.error('Error in POST /users:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 
-
-
-// DELETE /users/:id - delete user by user_id
-router.delete('/:id', (req, res) => {
+// DELETE USER BY ID
+router.delete('/:id', async (req, res) => {
   const userId = req.params.id;
 
   if (!userId) {
     return res.status(400).json({ error: 'User ID is required' });
   }
 
-  const sql = 'DELETE FROM useraccounts WHERE user_id = ?';
-  db.query(sql, [userId], (err, result) => {
-    if (err) {
-      console.error('Database error:', err);
-      return res.status(500).json({ error: err.message });
-    }
+  try {
+    const sqlDelete = 'DELETE FROM useraccounts WHERE user_id = ?';
+    const result = await query(sqlDelete, [userId]);
 
     if (result.affectedRows === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
 
     res.json({ message: `User with ID ${userId} deleted successfully` });
-  });
+  } catch (err) {
+    console.error('Error in DELETE /users/:id:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 
-//UPDATE USER BY ID
-// PUT /users/:id - update a user
-router.put('/:id', (req, res) => {
+// UPDATE USER BY ID
+router.put('/:id', async (req, res) => {
   const userId = req.params.id;
   const { user_password, user_fullname, user_level, building_name } = req.body;
 
-  if (!user_fullname || !user_level || !building_name) {
-    return res.status(400).json({ error: 'Fullname, level, and building are required' });
-  }
+  try {
+    // Get existing user
+    const sqlGet = 'SELECT * FROM useraccounts WHERE user_id = ?';
+    const results = await query(sqlGet, [userId]);
 
-  // Helper function to do the DB update
-  const doUpdate = (hashedPassword) => {
-    const sql = `
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const existing = results[0];
+
+    // Determine final values (preserve existing if not provided)
+    const finalFullname = user_fullname || existing.user_fullname;
+    const finalLevel = user_level || existing.user_level;
+    const finalBuilding = building_name || existing.building_name;
+
+    let finalPassword = existing.user_password;
+    if (user_password) {
+      finalPassword = await hashPassword(user_password);
+    }
+
+    // Update user
+    const sqlUpdate = `
       UPDATE useraccounts
       SET user_password = ?, user_fullname = ?, user_level = ?, building_name = ?
       WHERE user_id = ?
     `;
+    await query(sqlUpdate, [finalPassword, finalFullname, finalLevel, finalBuilding, userId]);
 
-    db.query(sql, [hashedPassword, user_fullname, user_level, building_name, userId], (err, result) => {
-      if (err) {
-        console.error('Database error:', err);
-        return res.status(500).json({ error: err.message });
-      }
-
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      res.json({ message: `User with ID ${userId} updated successfully` });
-    });
-  };
-
-  // Handle password hashing if password is provided
-  if (user_password) {
-    const saltRounds = 10;
-    bcrypt.hash(user_password, saltRounds, (err, hashedPassword) => {
-      if (err) {
-        console.error('Hash error:', err);
-        return res.status(500).json({ error: 'Error hashing password' });
-      }
-      doUpdate(hashedPassword);
-    });
-  } else {
-    // No new password provided — keep existing
-    // Typically you'd SELECT current password from DB
-    const sqlGet = 'SELECT user_password FROM useraccounts WHERE user_id = ?';
-    db.query(sqlGet, [userId], (err, results) => {
-      if (err) {
-        console.error('Database error:', err);
-        return res.status(500).json({ error: err.message });
-      }
-
-      if (results.length === 0) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      const existingPassword = results[0].user_password;
-      doUpdate(existingPassword);
-    });
+    res.json({ message: `User with ID ${userId} updated successfully` });
+  } catch (err) {
+    console.error('Error in PUT /users/:id:', err);
+    res.status(500).json({ error: err.message });
   }
 });
-
-
-
-
 
 module.exports = router;
