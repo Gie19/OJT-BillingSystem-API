@@ -41,7 +41,8 @@ router.post('/login', async (req, res) => {
     // Create JWT payload
     const payload = {
       user_id: user.user_id,
-      user_level: user.user_level
+      user_level: user.user_level,
+      user_fullname: user.user_fullname
     };
 
     // Sign JWT
