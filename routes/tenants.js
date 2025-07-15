@@ -48,45 +48,46 @@ router.get('/:id', authorizeRole('admin'), async (req, res) => {
 
 //CREATE NEW TENANT
 router.post('/', authorizeRole('admin'), async (req, res) => {
-    const { tenant_id, tenant_name, bill_start, bill_end } = req.body;
+  const { tenant_id, tenant_name, bill_start, bill_end } = req.body;
 
-    if (!tenant_id || !tenant_name || !bill_start || !bill_end) {
-        return res.status(400).json({ error: 'All fields are required' });
+  if (!tenant_id || !tenant_name || !bill_start || !bill_end) {
+    return res.status(400).json({ error: 'All fields are required' });
+  }
+
+  try {
+    // Fix: get the highest existing number
+    const sqlFind = `
+      SELECT id FROM tenants
+      WHERE id LIKE 'T%'
+      ORDER BY CAST(SUBSTRING(id, 2) AS UNSIGNED) DESC
+      LIMIT 1
+    `;
+    const results = await query(sqlFind);
+
+    let nextNumber = 1;
+    if (results.length > 0) {
+      const lastId = results[0].id;
+      const lastNumber = parseInt(lastId.slice(1), 10);
+      nextNumber = lastNumber + 1;
     }
 
-    try {
-        const sqlFind = `
-            SELECT id FROM tenants
-            WHERE id LIKE 'TNT%'
-            ORDER BY CAST(SUBSTRING(id, 4) AS UNSIGNED) DESC
-            LIMIT 1
-        `;
+    const newId = `T${nextNumber}`;
+    const today = getCurrentDateTime();
+    const updatedBy = req.user.user_fullname;
 
-        
-        const results = await query(sqlFind);
+    const sqlInsert = `
+      INSERT INTO tenants (id, tenant_id, tenant_name, bill_start, bill_end, last_updated, updated_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `;
+    await query(sqlInsert, [newId, tenant_id, tenant_name, bill_start, bill_end, today, updatedBy]);
 
-        let nextNumber = 1;
-            if (results.length > 0) {
-            const lastId = results[0].id;
-            const lastNumber = parseInt(lastId.slice(3), 10);
-            nextNumber = lastNumber + 1;
-        }
-
-        const newId = `TNT${nextNumber}`;
-        const today = getCurrentDateTime();
-        const updatedBy = req.user.user_fullname;
-
-        const sqlInsert = `
-            INSERT INTO tenants (id, tenant_id, tenant_name, bill_start, bill_end, last_updated, updated_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        `;
-        await query(sqlInsert, [newId, tenant_id, tenant_name, bill_start, bill_end, today, updatedBy]);
-        res.status(201).json({ message: 'Tenant created successfully', tenantId: newId });
-    } catch (err) {
-        console.error('Error in POST /tenants:', err);
-        res.status(500).json({ error: err.message });
-    }
+    res.status(201).json({ message: 'Tenant created successfully', tenantId: newId });
+  } catch (err) {
+    console.error('Error in POST /tenants:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
+
 
 //UPDATE TENANT BY ID
 router.put('/:id', authorizeRole('admin'), async (req, res) => {

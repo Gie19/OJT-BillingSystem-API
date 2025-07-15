@@ -10,6 +10,7 @@ var indexRouter = require('./routes/index');
 var usersRouter = require('./routes/users');
 var authRouter = require('./routes/auth');
 var tenantsRouter = require('./routes/tenants');
+var stallsRouter = require('./routes/stalls');
 
 //DB connection 
 const db = require('./db');
@@ -32,6 +33,7 @@ app.use('/', indexRouter);
 app.use('/users', usersRouter);
 app.use('/auth', authRouter);
 app.use('/tenants', tenantsRouter);
+app.use('/stalls', stallsRouter);
 
 // catch 404 and forward to error handler
 app.use(function(req, res, next) {
