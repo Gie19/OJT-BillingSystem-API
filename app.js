@@ -12,12 +12,15 @@ var authRouter = require('./routes/auth');
 var tenantsRouter = require('./routes/tenants');
 var stallsRouter = require('./routes/stalls');
 var meterRouter = require('./routes/meters');
+var stallsRouter = require('./routes/stalls');
+var readingsRouter = require('./routes/readings');
 
 //DB connection 
 const db = require('./db');
 
 
 const { error } = require('console');
+const { read } = require('fs');
 
 
 var app = express();
@@ -36,6 +39,7 @@ app.use('/auth', authRouter);
 app.use('/tenants', tenantsRouter);
 app.use('/stalls', stallsRouter);
 app.use('/meters', meterRouter);
+app.use('/readings', readingsRouter);
 
 // catch 404 and forward to error handler
 app.use(function(req, res, next) {

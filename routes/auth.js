@@ -20,7 +20,7 @@ router.post('/login', async (req, res) => {
 
   try {
     // Look up user in the database
-    const results = await query('SELECT * FROM useraccounts WHERE user_id = ?', [user_id]);
+    const results = await query('SELECT * FROM user_accounts WHERE user_id = ?', [user_id]);
 
     if (results.length === 0) {
       return res.status(401).json({ error: 'No existing credentials' });

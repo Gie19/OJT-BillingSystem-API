@@ -15,7 +15,7 @@ router.use(authenticateToken);
 // GET ALL USERS
 router.get('/', authorizeRole('admin'), async (req, res) => {
   try {
-    const results = await query('SELECT * FROM useraccounts');
+    const results = await query('SELECT * FROM user_accounts');
     res.json(results);
   } catch (err) {
     console.error('Database error:', err);
@@ -28,7 +28,7 @@ router.get('/', authorizeRole('admin'), async (req, res) => {
 router.get('/:id', authorizeRole('admin'), async (req, res) => {
   const userId = req.params.id;
   try {
-    const results = await query('SELECT * FROM useraccounts WHERE user_id = ?', [userId]);
+    const results = await query('SELECT * FROM user_accounts WHERE user_id = ?', [userId]);
 
     if (results.length === 0) {
       return res.status(404).json({ message: 'User not found' });
@@ -62,7 +62,7 @@ router.post('/',authorizeRole('admin'), async (req, res) => {
   try {
     // Get highest existing ID for this prefix
     const sqlFind = `
-      SELECT user_id FROM useraccounts
+      SELECT user_id FROM user_accounts
       WHERE user_id LIKE ?
       ORDER BY CAST(SUBSTRING(user_id, 2) AS UNSIGNED) DESC
       LIMIT 1
@@ -83,7 +83,7 @@ router.post('/',authorizeRole('admin'), async (req, res) => {
 
     // Insert new user
     const sqlInsert = `
-      INSERT INTO useraccounts (user_id, user_password, user_fullname, user_level, building_name)
+      INSERT INTO user_accounts (user_id, user_password, user_fullname, user_level, building_name)
       VALUES (?, ?, ?, ?, ?)
     `;
     await query(sqlInsert, [newUserId, hashedPassword, user_fullname, user_level, building_name]);
@@ -108,7 +108,7 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   }
 
   try {
-    const sqlDelete = 'DELETE FROM useraccounts WHERE user_id = ?';
+    const sqlDelete = 'DELETE FROM user_accounts WHERE user_id = ?';
     const result = await query(sqlDelete, [userId]);
 
     if (result.affectedRows === 0) {
@@ -130,7 +130,7 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
 
   try {
     // Get existing user
-    const sqlGet = 'SELECT * FROM useraccounts WHERE user_id = ?';
+    const sqlGet = 'SELECT * FROM user_accounts WHERE user_id = ?';
     const results = await query(sqlGet, [userId]);
 
     if (results.length === 0) {
@@ -151,7 +151,7 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
 
     // Update user
     const sqlUpdate = `
-      UPDATE useraccounts
+      UPDATE user_accounts
       SET user_password = ?, user_fullname = ?, user_level = ?, building_name = ?
       WHERE user_id = ?
     `;
