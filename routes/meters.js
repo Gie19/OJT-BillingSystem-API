@@ -47,23 +47,22 @@ router.get('/:id', authorizeRole('admin'), async (req, res) => {
 
 // CREATE NEW METER
 router.post('/', authorizeRole('admin'), async (req, res) => {
-  const { meter_type, meter_sn, stall_id, meter_status } = req.body;
+  const { meter_type, meter_sn, stall_id, meter_status, mult } = req.body;
 
-  // Field validation
+  // Validation
   if (!meter_type || !meter_sn || !stall_id || !meter_status) {
-    return res.status(400).json({ error: 'All fields are required' });
+    return res.status(400).json({ error: 'All fields except mult are required' });
   }
 
   try {
-    // Validate that stall_id exists in stalls table
+    // Check if stall_id exists
     const stallCheckSql = 'SELECT stall_id FROM stalls WHERE stall_id = ?';
     const stallResults = await query(stallCheckSql, [stall_id]);
-
     if (stallResults.length === 0) {
       return res.status(400).json({ error: 'Invalid stall_id: Stall does not exist.' });
     }
 
-    // Get last meter_id like M1, M2, ...
+    // Get next meter_id
     const sqlFind = `
       SELECT meter_id FROM meters
       WHERE meter_id LIKE 'M%'
@@ -71,22 +70,25 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
       LIMIT 1
     `;
     const results = await query(sqlFind);
+    let nextNumber = results.length > 0 ? parseInt(results[0].meter_id.slice(1), 10) + 1 : 1;
+    const newMeterId = `M${nextNumber}`;
 
-    let nextNumber = 1;
-    if (results.length > 0) {
-      const lastId = results[0].meter_id;
-      const lastNumber = parseInt(lastId.slice(1), 10);
-      nextNumber = lastNumber + 1;
+    // Determine default mult if not provided
+    let finalMult = mult;
+    if (mult === undefined || mult === null || mult === '') {
+      if (meter_type.toLowerCase() === 'water') finalMult = 93.00;
+      else finalMult = 1;
     }
 
-    const newMeterId = `M${nextNumber}`;
     const today = getCurrentDateTime();
     const updatedBy = req.user.user_fullname;
 
-    // Insert new meter
     const sqlInsert = `
-      INSERT INTO meters (meter_id, meter_type, meter_sn, stall_id, meter_status, last_updated, updated_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO meters (
+        meter_id, meter_type, meter_sn, stall_id,
+        meter_status, mult, last_updated, updated_by
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `;
     await query(sqlInsert, [
       newMeterId,
@@ -94,6 +96,7 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
       meter_sn,
       stall_id,
       meter_status,
+      finalMult,
       today,
       updatedBy
     ]);
@@ -105,52 +108,61 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
   }
 });
 
+
 // UPDATE METER BY ID
 router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const meterId = req.params.id;
-  const { meter_type, meter_sn, stall_id, meter_status } = req.body;
+  const { meter_type, meter_sn, stall_id, meter_status, mult } = req.body;
   const updatedBy = req.user.user_fullname;
   const lastUpdated = getCurrentDateTime();
 
   try {
-    // Fetch existing record
+    // Fetch existing meter
     const sqlGet = 'SELECT * FROM meters WHERE meter_id = ?';
     const results = await query(sqlGet, [meterId]);
-
     if (results.length === 0) {
       return res.status(404).json({ error: 'Meter not found' });
     }
 
     const existing = results[0];
 
-    // Determine final field values
+    // Resolve final values
     const finalMeterType = meter_type || existing.meter_type;
     const finalMeterSn = meter_sn || existing.meter_sn;
     const finalStallId = stall_id || existing.stall_id;
     const finalMeterStatus = meter_status || existing.meter_status;
 
-    // If there's a stall_id, validate it exists
-    if (finalStallId) {
+    // Validate stall_id if changed
+    if (stall_id && stall_id !== existing.stall_id) {
       const stallCheckSql = 'SELECT stall_id FROM stalls WHERE stall_id = ?';
-      const stallResults = await query(stallCheckSql, [finalStallId]);
-
+      const stallResults = await query(stallCheckSql, [stall_id]);
       if (stallResults.length === 0) {
         return res.status(400).json({ error: 'Invalid stall_id: Stall does not exist.' });
       }
     }
 
-    // Perform the update
+    // Determine new mult
+    let finalMult;
+    if (mult !== undefined) {
+      finalMult = mult;
+    } else if (meter_type && meter_type !== existing.meter_type) {
+      // Use default only if meter_type changed and mult not manually set
+      finalMult = (meter_type.toLowerCase() === 'water') ? 93.00 : 1;
+    } else {
+      finalMult = existing.mult;
+    }
+
     const sqlUpdate = `
       UPDATE meters
-      SET meter_type = ?, meter_sn = ?, stall_id = ?, meter_status = ?, last_updated = ?, updated_by = ?
+      SET meter_type = ?, meter_sn = ?, stall_id = ?, meter_status = ?, mult = ?, last_updated = ?, updated_by = ?
       WHERE meter_id = ?
     `;
-
     await query(sqlUpdate, [
       finalMeterType,
       finalMeterSn,
       finalStallId,
       finalMeterStatus,
+      finalMult,
       lastUpdated,
       updatedBy,
       meterId

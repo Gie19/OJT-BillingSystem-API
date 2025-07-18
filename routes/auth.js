@@ -28,9 +28,6 @@ router.post('/login', async (req, res) => {
 
     const user = results[0];
 
-    console.log('Inputted password:', user_password);
-    console.log('Stored hash:', user.user_password);
-
     // Compare password using utility function
     const match = await comparePassword(user_password, user.user_password);
 
