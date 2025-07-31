@@ -6,10 +6,9 @@ const { hashPassword } = require('../utils/hashPassword');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
 
-
 const query = util.promisify(db.query).bind(db);
 
-// All routes below require valid token
+// All routes below require a valid token
 router.use(authenticateToken);
 
 // GET ALL USERS
@@ -22,7 +21,6 @@ router.get('/', authorizeRole('admin'), async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 
 // GET USER BY ID
 router.get('/:id', authorizeRole('admin'), async (req, res) => {
@@ -41,52 +39,39 @@ router.get('/:id', authorizeRole('admin'), async (req, res) => {
   }
 });
 
+// CREATE NEW USER WITH 'USER-' PREFIXED ID
+router.post('/', authorizeRole('admin'), async (req, res) => {
+  const { user_password, user_fullname, user_level, building_id } = req.body;
 
-// CREATE NEW USER WITH PREFIXED ID
-router.post('/',authorizeRole('admin'), async (req, res) => {
-  const { user_password, user_fullname, user_level, building_name } = req.body;
-
-  if (!user_password || !user_fullname || !user_level || !building_name) {
+  if (!user_password || !user_fullname || !user_level || !building_id) {
     return res.status(400).json({ error: 'All fields are required' });
   }
 
-  let prefix;
-  if (user_level.toLowerCase() === 'admin') {
-    prefix = 'A';
-  } else if (user_level.toLowerCase() === 'personnel') {
-    prefix = 'P';
-  } else {
-    return res.status(400).json({ error: 'Invalid user level' });
-  }
-
   try {
-    // Get highest existing ID for this prefix
+    // Get highest USER- ID
     const sqlFind = `
       SELECT user_id FROM user_accounts
-      WHERE user_id LIKE ?
-      ORDER BY CAST(SUBSTRING(user_id, 2) AS UNSIGNED) DESC
+      WHERE user_id LIKE 'USER-%'
+      ORDER BY CAST(SUBSTRING(user_id, 6) AS UNSIGNED) DESC
       LIMIT 1
     `;
-    const results = await query(sqlFind, [`${prefix}%`]);
+    const results = await query(sqlFind);
 
     let nextNumber = 1;
     if (results.length > 0) {
       const lastId = results[0].user_id;
-      const lastNumber = parseInt(lastId.slice(1), 10);
+      const lastNumber = parseInt(lastId.slice(5), 10); // skip 'USER-'
       nextNumber = lastNumber + 1;
     }
 
-    const newUserId = `${prefix}${nextNumber}`;
-
-    // Hash password
+    const newUserId = `USER-${nextNumber}`;
     const hashedPassword = await hashPassword(user_password);
 
-    // Insert new user
     const sqlInsert = `
-      INSERT INTO user_accounts (user_id, user_password, user_fullname, user_level, building_name)
+      INSERT INTO user_accounts (user_id, user_password, user_fullname, user_level, building_id)
       VALUES (?, ?, ?, ?, ?)
     `;
-    await query(sqlInsert, [newUserId, hashedPassword, user_fullname, user_level, building_name]);
+    await query(sqlInsert, [newUserId, hashedPassword, user_fullname, user_level, building_id]);
 
     res.status(201).json({
       message: 'User created successfully',
@@ -97,7 +82,6 @@ router.post('/',authorizeRole('admin'), async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 
 // DELETE USER BY ID
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
@@ -122,14 +106,12 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-
-// UPDATE USER BY ID
+// UPDATE USER BY ID (NO user_id CHANGE)
 router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const userId = req.params.id;
-  const { user_password, user_fullname, user_level, building_name } = req.body;
+  const { user_password, user_fullname, user_level, building_id } = req.body;
 
   try {
-    // Get existing user
     const sqlGet = 'SELECT * FROM user_accounts WHERE user_id = ?';
     const results = await query(sqlGet, [userId]);
 
@@ -138,24 +120,21 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
     }
 
     const existing = results[0];
-
-    // Determine final values (preserve existing if not provided)
     const finalFullname = user_fullname || existing.user_fullname;
     const finalLevel = user_level || existing.user_level;
-    const finalBuilding = building_name || existing.building_name;
+    const finalBuildingId = building_id || existing.building_id;
 
     let finalPassword = existing.user_password;
     if (user_password) {
       finalPassword = await hashPassword(user_password);
     }
 
-    // Update user
     const sqlUpdate = `
       UPDATE user_accounts
-      SET user_password = ?, user_fullname = ?, user_level = ?, building_name = ?
+      SET user_password = ?, user_fullname = ?, user_level = ?, building_id = ?
       WHERE user_id = ?
     `;
-    await query(sqlUpdate, [finalPassword, finalFullname, finalLevel, finalBuilding, userId]);
+    await query(sqlUpdate, [finalPassword, finalFullname, finalLevel, finalBuildingId, userId]);
 
     res.json({ message: `User with ID ${userId} updated successfully` });
   } catch (err) {
