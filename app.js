@@ -15,6 +15,9 @@ var meterRouter = require('./routes/meters');
 var stallsRouter = require('./routes/stalls');
 var readingsRouter = require('./routes/readings');
 var ratesRouter = require('./routes/rates');
+var buildingsRouter = require('./routes/buildings');
+
+
 
 //DB connection 
 const db = require('./db');
@@ -42,6 +45,7 @@ app.use('/stalls', stallsRouter);
 app.use('/meters', meterRouter);
 app.use('/readings', readingsRouter);
 app.use('/rates', ratesRouter);
+app.use('/buildings', buildingsRouter);
 
 // catch 404 and forward to error handler
 app.use(function(req, res, next) {

@@ -106,7 +106,7 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// UPDATE USER BY ID (NO user_id CHANGE)
+// UPDATE USER BY ID 
 router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const userId = req.params.id;
   const { user_password, user_fullname, user_level, building_id } = req.body;
