@@ -4,22 +4,19 @@ const db = require('../db');
 const util = require('util');
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 
-
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
-
+const authorizeBuilding = require('../middleware/authorizeBuilding'); // Add if needed
 
 const query = util.promisify(db.query).bind(db);
-
 
 // All routes below require valid token
 router.use(authenticateToken);
 
-
 // GET ALL METERS
 router.get('/', authorizeRole('admin'), async (req, res) => {
     try {
-        const results = await query('SELECT * FROM meters');
+        const results = await query('SELECT * FROM meter_list');
         res.json(results);
     } catch (err) {
         console.error('Database error:', err);
@@ -27,17 +24,14 @@ router.get('/', authorizeRole('admin'), async (req, res) => {
     }
 });
 
-
-//GET METER BY ID
+// GET METER BY ID
 router.get('/:id', authorizeRole('admin'), async (req, res) => {
     const meterId = req.params.id;
     try {
-        const results = await query('SELECT * FROM meters WHERE meter_id = ?', [meterId]);
-
+        const results = await query('SELECT * FROM meter_list WHERE meter_id = ?', [meterId]);
         if (results.length === 0) {
             return res.status(404).json({ message: 'Meter not found' });
         }
-
         res.json(results[0]);
     } catch (err) {
         console.error('Database error:', err);
@@ -47,157 +41,163 @@ router.get('/:id', authorizeRole('admin'), async (req, res) => {
 
 // CREATE NEW METER
 router.post('/', authorizeRole('admin'), async (req, res) => {
-  const { meter_type, meter_sn, stall_id, meter_status, mult } = req.body;
+    const { meter_type, meter_sn, meter_mult, stall_id, meter_status, qr_id } = req.body;
 
-  // Validation
-  if (!meter_type || !meter_sn || !stall_id || !meter_status) {
-    return res.status(400).json({ error: 'All fields except mult are required' });
-  }
-
-  try {
-    // Check if stall_id exists
-    const stallCheckSql = 'SELECT stall_id FROM stalls WHERE stall_id = ?';
-    const stallResults = await query(stallCheckSql, [stall_id]);
-    if (stallResults.length === 0) {
-      return res.status(400).json({ error: 'Invalid stall_id: Stall does not exist.' });
+    // Validation
+    if (!meter_type || !meter_sn || !stall_id || !meter_status || !qr_id) {
+        return res.status(400).json({ error: 'All fields except meter_mult are required' });
     }
 
-    // Get next meter_id
-    const sqlFind = `
-      SELECT meter_id FROM meters
-      WHERE meter_id LIKE 'M%'
-      ORDER BY CAST(SUBSTRING(meter_id, 2) AS UNSIGNED) DESC
-      LIMIT 1
-    `;
-    const results = await query(sqlFind);
-    let nextNumber = results.length > 0 ? parseInt(results[0].meter_id.slice(1), 10) + 1 : 1;
-    const newMeterId = `M${nextNumber}`;
+    try {
+        // Check if stall_id exists
+        const stallCheckSql = 'SELECT stall_id FROM stall_list WHERE stall_id = ?';
+        const stallResults = await query(stallCheckSql, [stall_id]);
+        if (stallResults.length === 0) {
+            return res.status(400).json({ error: 'Invalid stall_id: Stall does not exist.' });
+        }
 
-    // Determine default mult if not provided
-    let finalMult = mult;
-    if (mult === undefined || mult === null || mult === '') {
-      if (meter_type.toLowerCase() === 'water') finalMult = 93.00;
-      else finalMult = 1;
+        // Check if qr_id exists
+        const qrCheckSql = 'SELECT qr_id FROM qr_details WHERE qr_id = ?';
+        const qrResults = await query(qrCheckSql, [qr_id]);
+        if (qrResults.length === 0) {
+            return res.status(400).json({ error: 'Invalid qr_id: QR ID does not exist.' });
+        }
+
+        // Get next meter_id
+        const sqlFind = `
+            SELECT meter_id FROM meter_list
+            WHERE meter_id LIKE 'MTR-%'
+            ORDER BY CAST(SUBSTRING(meter_id, 5) AS UNSIGNED) DESC
+            LIMIT 1
+        `;
+        const results = await query(sqlFind);
+        const nextNumber = results.length > 0 ? parseInt(results[0].meter_id.slice(4), 10) + 1 : 1;
+        const newMeterId = `MTR-${nextNumber}`;
+
+        // Determine default meter_mult if not provided
+        let finalMult = meter_mult;
+        if (finalMult === undefined || finalMult === null || finalMult === '') {
+            finalMult = (meter_type.toLowerCase() === 'water') ? 93.00 : 1;
+        }
+
+        const today = getCurrentDateTime();
+        const updatedBy = req.user.user_fullname;
+
+        const sqlInsert = `
+            INSERT INTO meter_list (
+                meter_id, meter_type, meter_sn, meter_mult, stall_id,
+                meter_status, qr_id, last_updated, updated_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+        await query(sqlInsert, [
+            newMeterId,
+            meter_type,
+            meter_sn,
+            finalMult,
+            stall_id,
+            meter_status,
+            qr_id,
+            today,
+            updatedBy
+        ]);
+
+        res.status(201).json({ message: 'Meter created successfully', meterId: newMeterId });
+    } catch (err) {
+        console.error('Error in POST /meters:', err);
+        res.status(500).json({ error: err.message });
     }
-
-    const today = getCurrentDateTime();
-    const updatedBy = req.user.user_fullname;
-
-    const sqlInsert = `
-      INSERT INTO meters (
-        meter_id, meter_type, meter_sn, stall_id,
-        meter_status, mult, last_updated, updated_by
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `;
-    await query(sqlInsert, [
-      newMeterId,
-      meter_type,
-      meter_sn,
-      stall_id,
-      meter_status,
-      finalMult,
-      today,
-      updatedBy
-    ]);
-
-    res.status(201).json({ message: 'Meter created successfully', meterId: newMeterId });
-  } catch (err) {
-    console.error('Error in POST /meters:', err);
-    res.status(500).json({ error: err.message });
-  }
 });
-
 
 // UPDATE METER BY ID
 router.put('/:id', authorizeRole('admin'), async (req, res) => {
-  const meterId = req.params.id;
-  const { meter_type, meter_sn, stall_id, meter_status, mult } = req.body;
-  const updatedBy = req.user.user_fullname;
-  const lastUpdated = getCurrentDateTime();
+    const meterId = req.params.id;
+    const { meter_type, meter_sn, stall_id, meter_status, meter_mult, qr_id } = req.body;
+    const updatedBy = req.user.user_fullname;
+    const lastUpdated = getCurrentDateTime();
 
-  try {
-    // Fetch existing meter
-    const sqlGet = 'SELECT * FROM meters WHERE meter_id = ?';
-    const results = await query(sqlGet, [meterId]);
-    if (results.length === 0) {
-      return res.status(404).json({ error: 'Meter not found' });
+    try {
+        // Fetch existing meter
+        const sqlGet = 'SELECT * FROM meter_list WHERE meter_id = ?';
+        const results = await query(sqlGet, [meterId]);
+        if (results.length === 0) {
+            return res.status(404).json({ error: 'Meter not found' });
+        }
+
+        const existing = results[0];
+
+        // Resolve final values
+        const finalMeterType = meter_type || existing.meter_type;
+        const finalMeterSn = meter_sn || existing.meter_sn;
+        const finalStallId = stall_id || existing.stall_id;
+        const finalMeterStatus = meter_status || existing.meter_status;
+        const finalQrId = qr_id || existing.qr_id;
+        let finalMult = meter_mult !== undefined ? meter_mult : existing.meter_mult;
+
+        if (meter_type && meter_type !== existing.meter_type && meter_mult === undefined) {
+            finalMult = (meter_type.toLowerCase() === 'water') ? 93.00 : 1;
+        }
+
+        // Validate stall_id if changed
+        if (stall_id && stall_id !== existing.stall_id) {
+            const stallCheckSql = 'SELECT stall_id FROM stall_list WHERE stall_id = ?';
+            const stallResults = await query(stallCheckSql, [stall_id]);
+            if (stallResults.length === 0) {
+                return res.status(400).json({ error: 'Invalid stall_id: Stall does not exist.' });
+            }
+        }
+
+        // Validate qr_id if changed
+        if (qr_id && qr_id !== existing.qr_id) {
+            const qrCheckSql = 'SELECT qr_id FROM qr_details WHERE qr_id = ?';
+            const qrResults = await query(qrCheckSql, [qr_id]);
+            if (qrResults.length === 0) {
+                return res.status(400).json({ error: 'Invalid qr_id: QR does not exist.' });
+            }
+        }
+
+
+        const sqlUpdate = `
+            UPDATE meter_list
+            SET meter_type = ?, meter_sn = ?, stall_id = ?, meter_status = ?, meter_mult = ?, qr_id = ?, last_updated = ?, updated_by = ?
+            WHERE meter_id = ?
+        `;
+        await query(sqlUpdate, [
+            finalMeterType,
+            finalMeterSn,
+            finalStallId,
+            finalMeterStatus,
+            finalMult,
+            finalQrId,
+            lastUpdated,
+            updatedBy,
+            meterId
+        ]);
+
+        res.json({ message: `Meter with ID ${meterId} updated successfully` });
+    } catch (err) {
+        console.error('Error in PUT /meters/:id:', err);
+        res.status(500).json({ error: err.message });
     }
-
-    const existing = results[0];
-
-    // Resolve final values
-    const finalMeterType = meter_type || existing.meter_type;
-    const finalMeterSn = meter_sn || existing.meter_sn;
-    const finalStallId = stall_id || existing.stall_id;
-    const finalMeterStatus = meter_status || existing.meter_status;
-
-    // Validate stall_id if changed
-    if (stall_id && stall_id !== existing.stall_id) {
-      const stallCheckSql = 'SELECT stall_id FROM stalls WHERE stall_id = ?';
-      const stallResults = await query(stallCheckSql, [stall_id]);
-      if (stallResults.length === 0) {
-        return res.status(400).json({ error: 'Invalid stall_id: Stall does not exist.' });
-      }
-    }
-
-    // Determine new mult
-    let finalMult;
-    if (mult !== undefined) {
-      finalMult = mult;
-    } else if (meter_type && meter_type !== existing.meter_type) {
-      // Use default only if meter_type changed and mult not manually set
-      finalMult = (meter_type.toLowerCase() === 'water') ? 93.00 : 1;
-    } else {
-      finalMult = existing.mult;
-    }
-
-    const sqlUpdate = `
-      UPDATE meters
-      SET meter_type = ?, meter_sn = ?, stall_id = ?, meter_status = ?, mult = ?, last_updated = ?, updated_by = ?
-      WHERE meter_id = ?
-    `;
-    await query(sqlUpdate, [
-      finalMeterType,
-      finalMeterSn,
-      finalStallId,
-      finalMeterStatus,
-      finalMult,
-      lastUpdated,
-      updatedBy,
-      meterId
-    ]);
-
-    res.json({ message: `Meter with ID ${meterId} updated successfully` });
-  } catch (err) {
-    console.error('Error in PUT /meters/:id:', err);
-    res.status(500).json({ error: err.message });
-  }
 });
-
 
 // DELETE METER BY ID
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
-  const meterId = req.params.id;
-
-  if (!meterId) {
-    return res.status(400).json({ error: 'Meter ID is required' });
-  }
-
-  try {
-    const sqlDelete = 'DELETE FROM meters WHERE meter_id = ?';
-    const result = await query(sqlDelete, [meterId]);
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'Meter not found' });
+    const meterId = req.params.id;
+    if (!meterId) {
+        return res.status(400).json({ error: 'Meter ID is required' });
     }
-
-    res.json({ message: `Meter with ID ${meterId} deleted successfully` });
-  } catch (err) {
-    console.error('Error in DELETE /meters/:id:', err);
-    res.status(500).json({ error: err.message });
-  }
+    try {
+        const sqlDelete = 'DELETE FROM meter_list WHERE meter_id = ?';
+        const result = await query(sqlDelete, [meterId]);
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Meter not found' });
+        }
+        res.json({ message: `Meter with ID ${meterId} deleted successfully` });
+    } catch (err) {
+        console.error('Error in DELETE /meters/:id:', err);
+        res.status(500).json({ error: err.message });
+    }
 });
-
 
 module.exports = router;

@@ -18,7 +18,7 @@ router.use(authenticateToken);
 // GET ALL TENANTS
 router.get('/', authorizeRole('admin'), async (req, res) => {
   try {
-    const results = await query('SELECT * FROM tenants');
+    const results = await query('SELECT * FROM tenant_list');
     res.json(results);
   } catch (err) {
     console.error('Database error:', err);
@@ -31,7 +31,7 @@ router.get('/', authorizeRole('admin'), async (req, res) => {
 router.get('/:id', authorizeRole('admin'), async (req, res) => {
   const tenantId = req.params.id;
   try {
-    const results = await query('SELECT * FROM tenants WHERE id = ?', [tenantId]);
+    const results = await query('SELECT * FROM tenant_list WHERE tenant_id = ?', [tenantId]);
 
     if (results.length === 0) {
       return res.status(404).json({ message: 'Tenant not found' });

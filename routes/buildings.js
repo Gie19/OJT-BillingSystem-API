@@ -23,6 +23,21 @@ router.get('/', authorizeRole('admin', 'user'), async (req, res) => {
   }
 });
 
+//GET BUILDING BY ID
+router.get('/:id', authorizeRole('admin', 'user'), async (req, res) => {
+  const buildingId = req.params.id;
+  try {
+    const results = await query('SELECT * FROM building_list WHERE building_id = ?', [buildingId]);
+    if (results.length === 0) {
+      return res.status(404).json({ message: 'Building not found' });
+    }
+    res.json(results[0]);
+  } catch (err) {
+    console.error('Database error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+  
 
 //CREATE A NEW BUILDING
 router.post('/',  async (req, res) => {
