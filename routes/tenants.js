@@ -46,59 +46,72 @@ router.get('/:id', authorizeRole('admin'), async (req, res) => {
 
 
 
-//CREATE NEW TENANT
 router.post('/', authorizeRole('admin'), async (req, res) => {
-  const { tenant_id, tenant_name, bill_start, bill_end } = req.body;
+  const { tenant_sn, tenant_name, building_id, bill_start } = req.body;
 
-  if (!tenant_id || !tenant_name || !bill_start || !bill_end) {
+  if (!tenant_sn || !tenant_name || !building_id || !bill_start) {
     return res.status(400).json({ error: 'All fields are required' });
   }
 
   try {
-    // Fix: get the highest existing number
+    // Check for duplicate tenant_sn
+    const sqlCheckSn = `SELECT tenant_id FROM tenant_list WHERE tenant_sn = ? LIMIT 1`;
+    const snResults = await query(sqlCheckSn, [tenant_sn]);
+    if (snResults.length > 0) {
+      return res.status(409).json({ error: 'Tenant SN already exists. Please use a unique tenant SN.' });
+    }
+    // Find the highest T-numbered id
     const sqlFind = `
-      SELECT id FROM tenants
-      WHERE id LIKE 'T%'
-      ORDER BY CAST(SUBSTRING(id, 2) AS UNSIGNED) DESC
+      SELECT tenant_id FROM tenant_list
+      WHERE tenant_id LIKE 'T%'
+      ORDER BY CAST(SUBSTRING(tenant_id, 2) AS UNSIGNED) DESC
       LIMIT 1
     `;
     const results = await query(sqlFind);
 
     let nextNumber = 1;
     if (results.length > 0) {
-      const lastId = results[0].id;
+      const lastId = results[0].tenant_id;
       const lastNumber = parseInt(lastId.slice(1), 10);
       nextNumber = lastNumber + 1;
     }
 
-    const newId = `T${nextNumber}`;
+    const newTenantId = `T${nextNumber}`;
     const today = getCurrentDateTime();
-    const updatedBy = req.user.user_fullname;
+    const updatedBy = req.user?.user_fullname;
 
     const sqlInsert = `
-      INSERT INTO tenants (id, tenant_id, tenant_name, bill_start, bill_end, last_updated, updated_by)
+      INSERT INTO tenant_list (tenant_id, tenant_sn, tenant_name, building_id, bill_start, last_updated, updated_by)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `;
-    await query(sqlInsert, [newId, tenant_id, tenant_name, bill_start, bill_end, today, updatedBy]);
+    await query(sqlInsert, [
+      newTenantId,
+      tenant_sn,
+      tenant_name,
+      building_id,
+      bill_start,
+      today,
+      updatedBy
+    ]);
 
-    res.status(201).json({ message: 'Tenant created successfully', tenantId: newId });
+    res.status(201).json({ message: 'Tenant created successfully', tenantId: newTenantId });
   } catch (err) {
     console.error('Error in POST /tenants:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Server error, could not create tenant.' });
   }
 });
 
 
-//UPDATE TENANT BY ID
+
 router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const tenantId = req.params.id;
-  const { tenant_id, tenant_name, bill_start, bill_end } = req.body;
+  const { tenant_sn, tenant_name, building_id, bill_start } = req.body;
   const updatedBy = req.user.user_fullname;
   const lastUpdated = getCurrentDateTime();
 
-   try {
+  try {
     // Fetch existing record to support partial updates
-    const sqlGet = 'SELECT * FROM tenants WHERE id = ?';
+    const sqlGet = 'SELECT * FROM tenant_list WHERE tenant_id = ?';
     const results = await query(sqlGet, [tenantId]);
 
     if (results.length === 0) {
@@ -107,27 +120,36 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
 
     const existing = results[0];
 
+    // Only check for uniqueness if tenant_sn is being updated and is different
+    if (tenant_sn && tenant_sn !== existing.tenant_sn) {
+      const sqlCheckSn = `SELECT tenant_id FROM tenant_list WHERE tenant_sn = ? AND tenant_id <> ? LIMIT 1`;
+      const snResults = await query(sqlCheckSn, [tenant_sn, tenantId]);
+      if (snResults.length > 0) {
+        return res.status(409).json({ error: 'Tenant SN already exists. Please use a unique tenant SN.' });
+      }
+    }
+
     // Determine final values (use new if given, else old)
-    const finalId = tenant_id || existing.tenant_id;
+    const finalSn = tenant_sn || existing.tenant_sn;
     const finalName = tenant_name || existing.tenant_name;
-    const finalBillStart = bill_start || existing.bill_start;
-    const finalBillEnd = bill_end || existing.bill_end;
+    const finalBuilding = building_id || existing.building_id;
+    const finalBillPeriodStart = bill_start || existing.bill_start;
 
     // Perform the update
     const sqlUpdate = `
-      UPDATE tenants
-      SET tenant_id = ?, tenant_name = ?, bill_start = ?, bill_end = ?, last_updated = ?, updated_by = ?
-      WHERE id = ?
+      UPDATE tenant_list
+      SET tenant_sn = ?, tenant_name = ?, building_id = ?, bill_start = ?, last_updated = ?, updated_by = ?
+      WHERE tenant_id = ?
     `;
 
     await query(sqlUpdate, [
-        finalId,
-        finalName,
-        finalBillStart,
-        finalBillEnd,
-        lastUpdated,
-        updatedBy,
-        tenantId
+      finalSn,
+      finalName,
+      finalBuilding,
+      finalBillPeriodStart,
+      lastUpdated,
+      updatedBy,
+      tenantId
     ]);
 
     res.json({ message: `Tenant with ID ${tenantId} updated successfully` });
@@ -136,7 +158,6 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 
 //DELETE TENANT BY ID
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
@@ -147,7 +168,7 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   }
 
   try {
-    const sqlDelete = 'DELETE FROM tenants WHERE id = ?';
+    const sqlDelete = 'DELETE FROM tenant_list WHERE tenant_id = ?';
     const result = await query(sqlDelete, [tenantId]);
 
     if (result.affectedRows === 0) {
