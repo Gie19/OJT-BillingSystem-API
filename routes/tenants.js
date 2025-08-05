@@ -45,7 +45,7 @@ router.get('/:id', authorizeRole('admin'), async (req, res) => {
 });
 
 
-
+// CREATE NEW TENANT
 router.post('/', authorizeRole('admin'), async (req, res) => {
   const { tenant_sn, tenant_name, building_id, bill_start } = req.body;
 
@@ -60,11 +60,11 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
     if (snResults.length > 0) {
       return res.status(409).json({ error: 'Tenant SN already exists. Please use a unique tenant SN.' });
     }
-    // Find the highest T-numbered id
+    // Find the highest TNT-numbered id
     const sqlFind = `
       SELECT tenant_id FROM tenant_list
-      WHERE tenant_id LIKE 'T%'
-      ORDER BY CAST(SUBSTRING(tenant_id, 2) AS UNSIGNED) DESC
+      WHERE tenant_id LIKE 'TNT-%'
+      ORDER BY CAST(SUBSTRING(tenant_id, 5) AS UNSIGNED) DESC
       LIMIT 1
     `;
     const results = await query(sqlFind);
@@ -72,11 +72,11 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
     let nextNumber = 1;
     if (results.length > 0) {
       const lastId = results[0].tenant_id;
-      const lastNumber = parseInt(lastId.slice(1), 10);
+      const lastNumber = parseInt(lastId.slice(4), 10); // 'TNT-' is 4 chars
       nextNumber = lastNumber + 1;
     }
 
-    const newTenantId = `T${nextNumber}`;
+    const newTenantId = `TNT-${nextNumber}`;
     const today = getCurrentDateTime();
     const updatedBy = req.user?.user_fullname;
 
@@ -102,7 +102,7 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
 });
 
 
-
+//UPDATE TENANT BY ID
 router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const tenantId = req.params.id;
   const { tenant_sn, tenant_name, building_id, bill_start } = req.body;

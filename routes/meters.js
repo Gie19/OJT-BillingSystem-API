@@ -39,13 +39,13 @@ router.get('/:id', authorizeRole('admin'), async (req, res) => {
     }
 });
 
-// CREATE NEW METER
+//CREATE NEW METER
 router.post('/', authorizeRole('admin'), async (req, res) => {
     const { meter_type, meter_sn, meter_mult, stall_id, meter_status, qr_id } = req.body;
 
-    // Validation
-    if (!meter_type || !meter_sn || !stall_id || !meter_status || !qr_id) {
-        return res.status(400).json({ error: 'All fields except meter_mult are required' });
+    // Validation (qr_id not required)
+    if (!meter_type || !meter_sn || !stall_id || !meter_status) {
+        return res.status(400).json({ error: 'meter_type, meter_sn, stall_id, and meter_status are required' });
     }
 
     try {
@@ -56,11 +56,13 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
             return res.status(400).json({ error: 'Invalid stall_id: Stall does not exist.' });
         }
 
-        // Check if qr_id exists
-        const qrCheckSql = 'SELECT qr_id FROM qr_details WHERE qr_id = ?';
-        const qrResults = await query(qrCheckSql, [qr_id]);
-        if (qrResults.length === 0) {
-            return res.status(400).json({ error: 'Invalid qr_id: QR ID does not exist.' });
+        // Check if qr_id exists (only if provided and not null/empty)
+        if (qr_id) {
+            const qrCheckSql = 'SELECT qr_id FROM qr_details WHERE qr_id = ?';
+            const qrResults = await query(qrCheckSql, [qr_id]);
+            if (qrResults.length === 0) {
+                return res.status(400).json({ error: 'Invalid qr_id: QR ID does not exist.' });
+            }
         }
 
         // Get next meter_id
@@ -97,7 +99,7 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
             finalMult,
             stall_id,
             meter_status,
-            qr_id,
+            qr_id || null,   // Insert NULL if no qr_id provided
             today,
             updatedBy
         ]);
@@ -131,7 +133,7 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
         const finalMeterSn = meter_sn || existing.meter_sn;
         const finalStallId = stall_id || existing.stall_id;
         const finalMeterStatus = meter_status || existing.meter_status;
-        const finalQrId = qr_id || existing.qr_id;
+        let finalQrId = (qr_id !== undefined) ? qr_id : existing.qr_id;
         let finalMult = meter_mult !== undefined ? meter_mult : existing.meter_mult;
 
         if (meter_type && meter_type !== existing.meter_type && meter_mult === undefined) {
@@ -147,7 +149,7 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
             }
         }
 
-        // Validate qr_id if changed
+        // Validate qr_id if changed and not null/empty
         if (qr_id && qr_id !== existing.qr_id) {
             const qrCheckSql = 'SELECT qr_id FROM qr_details WHERE qr_id = ?';
             const qrResults = await query(qrCheckSql, [qr_id]);
@@ -155,7 +157,6 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
                 return res.status(400).json({ error: 'Invalid qr_id: QR does not exist.' });
             }
         }
-
 
         const sqlUpdate = `
             UPDATE meter_list
@@ -168,7 +169,7 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
             finalStallId,
             finalMeterStatus,
             finalMult,
-            finalQrId,
+            (qr_id === undefined || qr_id === '') ? null : finalQrId,
             lastUpdated,
             updatedBy,
             meterId
@@ -180,6 +181,7 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
 
 // DELETE METER BY ID
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {

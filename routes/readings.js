@@ -7,9 +7,7 @@ const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
 
-
 const query = util.promisify(db.query).bind(db);
-
 
 // All routes below require valid token
 router.use(authenticateToken);
@@ -30,11 +28,9 @@ router.get('/:id', authorizeRole('admin', 'personnel'), async (req, res) => {
     const readingId = req.params.id;
     try {
         const results = await query('SELECT * FROM meter_reading WHERE reading_id = ?', [readingId]);
-    
         if (results.length === 0) {
-        return res.status(404).json({ message: 'Meter reading not found' });
+            return res.status(404).json({ message: 'Meter reading not found' });
         }
-    
         res.json(results[0]);
     } catch (err) {
         console.error('Database error:', err);
@@ -44,27 +40,31 @@ router.get('/:id', authorizeRole('admin', 'personnel'), async (req, res) => {
 
 // CREATE NEW METER READING
 router.post('/', authorizeRole('admin','personnel'), async (req, res) => {
-  const { meter_sn, prev_reading, curr_reading } = req.body;
+  const { meter_id, prev_reading, curr_reading } = req.body;
 
-  // Field validation
-  if (!meter_sn || !prev_reading || !curr_reading) {
-    return res.status(400).json({ error: 'All fields are required' });
+  // Only meter_id is required
+  if (!meter_id) {
+    return res.status(400).json({ error: 'meter_id is required' });
   }
 
+  // Default to 0.00 if not provided
+  const safePrev = (prev_reading !== undefined && prev_reading !== null && prev_reading !== '') ? prev_reading : 0.00;
+  const safeCurr = (curr_reading !== undefined && curr_reading !== null && curr_reading !== '') ? curr_reading : 0.00;
+
   try {
-    // Validate that meter_sn exists in meters table
-    const meterCheckSql = 'SELECT meter_sn FROM meters WHERE meter_sn = ?';
-    const meterResults = await query(meterCheckSql, [meter_sn]);
+    // Validate that meter_id exists in meter_list table
+    const meterCheckSql = 'SELECT meter_id FROM meter_list WHERE meter_id = ?';
+    const meterResults = await query(meterCheckSql, [meter_id]);
 
     if (meterResults.length === 0) {
       return res.status(404).json({ error: 'Meter not found' });
     }
 
-    // Get next reading_id 
+    // Get next reading_id (with MR- prefix)
     const sqlFind = `
       SELECT reading_id FROM meter_reading
-      WHERE reading_id LIKE 'R%'
-      ORDER BY CAST(SUBSTRING(reading_id, 2) AS UNSIGNED) DESC
+      WHERE reading_id LIKE 'MR-%'
+      ORDER BY CAST(SUBSTRING(reading_id, 4) AS UNSIGNED) DESC
       LIMIT 1
     `;
     const results = await query(sqlFind);
@@ -72,11 +72,11 @@ router.post('/', authorizeRole('admin','personnel'), async (req, res) => {
     let nextNumber = 1;
     if (results.length > 0) {
       const lastId = results[0].reading_id;
-      const lastNumber = parseInt(lastId.slice(1), 10);
+      const lastNumber = parseInt(lastId.slice(3), 10); // after 'MR-'
       nextNumber = lastNumber + 1;
     }
 
-    const newReadingId = `R${nextNumber}`;
+    const newReadingId = `MR-${nextNumber}`;
     const now = getCurrentDateTime();
     const updatedBy = req.user.user_fullname;
 
@@ -85,7 +85,7 @@ router.post('/', authorizeRole('admin','personnel'), async (req, res) => {
     let read_by = null;
 
     // Check if both readings are 0.00
-    const bothZero = parseFloat(prev_reading) === 0.00 && parseFloat(curr_reading) === 0.00;
+    const bothZero = parseFloat(safePrev) === 0.00 && parseFloat(safeCurr) === 0.00;
 
     if (!bothZero) {
       lastread_date = now;
@@ -96,7 +96,7 @@ router.post('/', authorizeRole('admin','personnel'), async (req, res) => {
     const insertSql = `
       INSERT INTO meter_reading (
         reading_id,
-        meter_sn,
+        meter_id,
         prev_reading,
         curr_reading,
         lastread_date,
@@ -108,9 +108,9 @@ router.post('/', authorizeRole('admin','personnel'), async (req, res) => {
     `;
     await query(insertSql, [
       newReadingId,
-      meter_sn,
-      prev_reading,
-      curr_reading,
+      meter_id,
+      safePrev,
+      safeCurr,
       lastread_date,
       read_by,
       now,
@@ -124,11 +124,10 @@ router.post('/', authorizeRole('admin','personnel'), async (req, res) => {
   }
 });
 
-
 // UPDATE METER READING BY ID
 router.put('/:id', authorizeRole('admin', 'personnel'), async (req, res) => {
   const readingId = req.params.id;
-  const { meter_sn, prev_reading, curr_reading } = req.body;
+  const { meter_id, prev_reading, curr_reading } = req.body;
   const updatedBy = req.user.user_fullname;
   const now = getCurrentDateTime();
 
@@ -143,33 +142,35 @@ router.put('/:id', authorizeRole('admin', 'personnel'), async (req, res) => {
 
     const existing = results[0];
 
-    // Detect if meter_sn changed
-    const isMeterSnChanged = meter_sn && meter_sn !== existing.meter_sn;
+    // Detect if meter_id changed
+    const isMeterIdChanged = meter_id && meter_id !== existing.meter_id;
+
+    // Safely handle possible empty/undefined/null values for readings
+    const finalPrevReading = (prev_reading !== undefined && prev_reading !== null && prev_reading !== '')
+      ? prev_reading : (prev_reading === undefined ? existing.prev_reading : 0.00);
+
+    const finalCurrReading = (curr_reading !== undefined && curr_reading !== null && curr_reading !== '')
+      ? curr_reading : (curr_reading === undefined ? existing.curr_reading : 0.00);
 
     // Detect if readings changed
     const isReadingChanged = (
-      (prev_reading !== undefined && prev_reading !== existing.prev_reading) ||
-      (curr_reading !== undefined && curr_reading !== existing.curr_reading)
+      (prev_reading !== undefined && finalPrevReading !== existing.prev_reading) ||
+      (curr_reading !== undefined && finalCurrReading !== existing.curr_reading)
     );
 
-    // Validate new meter_sn if it's changing
-    if (isMeterSnChanged) {
-      const meterCheckSql = 'SELECT meter_sn FROM meters WHERE meter_sn = ?';
-      const meterResults = await query(meterCheckSql, [meter_sn]);
+    // Validate new meter_id if it's changing
+    if (isMeterIdChanged) {
+      const meterCheckSql = 'SELECT meter_id FROM meter_list WHERE meter_id = ?';
+      const meterResults = await query(meterCheckSql, [meter_id]);
       if (meterResults.length === 0) {
-        return res.status(400).json({ error: 'Invalid meter_sn: Meter does not exist.' });
+        return res.status(400).json({ error: 'Invalid meter_id: Meter does not exist.' });
       }
     }
 
     // No changes?
-    if (!isMeterSnChanged && !isReadingChanged) {
+    if (!isMeterIdChanged && !isReadingChanged) {
       return res.status(400).json({ message: 'No changes detected in the request body.' });
     }
-
-    // Prepare final values
-    const finalMeterSn = meter_sn || existing.meter_sn;
-    const finalPrevReading = (prev_reading !== undefined) ? prev_reading : existing.prev_reading;
-    const finalCurrReading = (curr_reading !== undefined) ? curr_reading : existing.curr_reading;
 
     // Decide lastread_date and read_by if readings changed
     let lastread_date = existing.lastread_date;
@@ -189,17 +190,17 @@ router.put('/:id', authorizeRole('admin', 'personnel'), async (req, res) => {
     let sqlUpdate;
     let params;
 
-    if (isMeterSnChanged && isReadingChanged) {
+    if (isMeterIdChanged && isReadingChanged) {
       // Both changed
       sqlUpdate = `
         UPDATE meter_reading
-        SET meter_sn = ?, prev_reading = ?, curr_reading = ?, 
+        SET meter_id = ?, prev_reading = ?, curr_reading = ?, 
             lastread_date = ?, read_by = ?, 
             last_updated = ?, updated_by = ?
         WHERE reading_id = ?
       `;
       params = [
-        finalMeterSn,
+        meter_id,
         finalPrevReading,
         finalCurrReading,
         lastread_date,
@@ -208,15 +209,15 @@ router.put('/:id', authorizeRole('admin', 'personnel'), async (req, res) => {
         updatedBy,
         readingId
       ];
-    } else if (isMeterSnChanged) {
-      // Only meter_sn changed
+    } else if (isMeterIdChanged) {
+      // Only meter_id changed
       sqlUpdate = `
         UPDATE meter_reading
-        SET meter_sn = ?, last_updated = ?, updated_by = ?
+        SET meter_id = ?, last_updated = ?, updated_by = ?
         WHERE reading_id = ?
       `;
       params = [
-        finalMeterSn,
+        meter_id,
         now,
         updatedBy,
         readingId
@@ -249,7 +250,6 @@ router.put('/:id', authorizeRole('admin', 'personnel'), async (req, res) => {
   }
 });
 
-
 // DELETE METER READING BY ID
 router.delete('/:id', authorizeRole('admin', 'personnel'), async (req, res) => {
   const readingId = req.params.id;
@@ -272,6 +272,5 @@ router.delete('/:id', authorizeRole('admin', 'personnel'), async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 
 module.exports = router;

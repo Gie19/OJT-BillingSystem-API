@@ -23,23 +23,6 @@ router.get('/', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// GET STALL BY ID
-router.get('/:id', authorizeRole('admin'), async (req, res) => {
-  const stallId = req.params.id;
-  try {
-    const results = await query('SELECT * FROM stall_list WHERE stall_id = ?', [stallId]);
-
-    if (results.length === 0) {
-      return res.status(404).json({ message: 'Stall not found' });
-    }
-
-    res.json(results[0]);
-  } catch (err) {
-    console.error('Database error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // CREATE NEW STALL
 router.post('/', authorizeRole('admin'), async (req, res) => {
   const { stall_sn, tenant_id, building_id, stall_status } = req.body;
@@ -55,11 +38,11 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
       return res.status(409).json({ error: 'stall_sn already exists. Please use a unique stall_sn.' });
     }
 
-    // Generate custom S ID (stall_id)
+    // Generate custom STL- ID (stall_id)
     const sqlFind = `
       SELECT stall_id FROM stall_list
-      WHERE stall_id LIKE 'S%'
-      ORDER BY CAST(SUBSTRING(stall_id, 2) AS UNSIGNED) DESC
+      WHERE stall_id LIKE 'STL-%'
+      ORDER BY CAST(SUBSTRING(stall_id, 5) AS UNSIGNED) DESC
       LIMIT 1
     `;
     const results = await query(sqlFind);
@@ -67,10 +50,10 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
     let nextNumber = 1;
     if (results.length > 0) {
       const lastId = results[0].stall_id;
-      const lastNumber = parseInt(lastId.slice(1), 10);
+      const lastNumber = parseInt(lastId.slice(4), 10); // skip 'STL-'
       nextNumber = lastNumber + 1;
     }
-    const newStallId = `S${nextNumber}`;
+    const newStallId = `STL-${nextNumber}`;
     const today = getCurrentDateTime();
     const updatedBy = req.user.user_fullname;
 
@@ -110,6 +93,7 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 // UPDATE STALL BY stall_id
 router.put('/:id', authorizeRole('admin'), async (req, res) => {

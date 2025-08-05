@@ -49,13 +49,13 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
   try {
     const sqlFind = `
       SELECT rate_id FROM utility_rate
-      WHERE rate_id LIKE 'R-%'
-      ORDER BY CAST(SUBSTRING(rate_id, 3) AS UNSIGNED) DESC
+      WHERE rate_id LIKE 'UR-%'
+      ORDER BY CAST(SUBSTRING(rate_id, 4) AS UNSIGNED) DESC
       LIMIT 1
     `;
     const results = await query(sqlFind);
-    const nextNumber = results.length > 0 ? parseInt(results[0].rate_id.slice(2), 10) + 1 : 1;
-    const newRateId = `R-${nextNumber}`;
+    const nextNumber = results.length > 0 ? parseInt(results[0].rate_id.slice(3), 10) + 1 : 1;
+    const newRateId = `UR-${nextNumber}`;
     const today = getCurrentDateTime();
     const updatedBy = req.user.user_fullname;
 
