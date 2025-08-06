@@ -12,11 +12,11 @@
     "cors": "^2.8.5",
     "debug": "~2.6.9",
     "dotenv": "^17.2.0",
-    "express": "~4.16.1",
+    "express": "^4.21.2",
     "http-errors": "~1.6.3",
-    "jade": "~1.11.0",
+    "jade": "^0.31.2",
     "jsonwebtoken": "^9.0.2",
-    "morgan": "~1.9.1",
+    "morgan": "^1.10.1",
     "mysql": "^2.18.1"
   },
   "devDependencies": {
