@@ -1,13 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../db');
-const util = require('util');
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
-
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
-
-const query = util.promisify(db.query).bind(db);
+const Rate = require('../models/Rate');
+const { Op, literal } = require('sequelize');
 
 // All routes below require valid token
 router.use(authenticateToken);
@@ -15,8 +12,8 @@ router.use(authenticateToken);
 // GET ALL RATES
 router.get('/', authorizeRole('admin'), async (req, res) => {
   try {
-    const results = await query('SELECT * FROM utility_rate');
-    res.json(results);
+    const rates = await Rate.findAll();
+    res.json(rates);
   } catch (err) {
     console.error('Database error:', err);
     res.status(500).json({ error: err.message });
@@ -25,13 +22,10 @@ router.get('/', authorizeRole('admin'), async (req, res) => {
 
 // GET RATE BY ID
 router.get('/:id', authorizeRole('admin'), async (req, res) => {
-  const rateId = req.params.id;
   try {
-    const results = await query('SELECT * FROM utility_rate WHERE rate_id = ?', [rateId]);
-    if (results.length === 0) {
-      return res.status(404).json({ message: 'Rate not found' });
-    }
-    res.json(results[0]);
+    const rate = await Rate.findOne({ where: { rate_id: req.params.id } });
+    if (!rate) return res.status(404).json({ message: 'Rate not found' });
+    res.json(rate);
   } catch (err) {
     console.error('Database error:', err);
     res.status(500).json({ error: err.message });
@@ -42,32 +36,30 @@ router.get('/:id', authorizeRole('admin'), async (req, res) => {
 router.post('/', authorizeRole('admin'), async (req, res) => {
   const { erate_perKwH, e_vat, emin_con, wmin_con, wrate_perCbM, wnet_vat, w_vat, l_rate } = req.body;
 
-  if (!erate_perKwH || !e_vat || !emin_con || !wmin_con || !wrate_perCbM || !wnet_vat || !w_vat || !l_rate) {
+  if (
+    erate_perKwH === undefined || e_vat === undefined || emin_con === undefined ||
+    wmin_con === undefined || wrate_perCbM === undefined || wnet_vat === undefined ||
+    w_vat === undefined || l_rate === undefined
+  ) {
     return res.status(400).json({ error: 'All fields are required' });
   }
 
   try {
-    const sqlFind = `
-      SELECT rate_id FROM utility_rate
-      WHERE rate_id LIKE 'UR-%'
-      ORDER BY CAST(SUBSTRING(rate_id, 4) AS UNSIGNED) DESC
-      LIMIT 1
-    `;
-    const results = await query(sqlFind);
-    const nextNumber = results.length > 0 ? parseInt(results[0].rate_id.slice(3), 10) + 1 : 1;
+    const lastRate = await Rate.findOne({
+      where: { rate_id: { [Op.like]: 'UR-%' } },
+      order: [[literal("CAST(SUBSTRING(rate_id, 4) AS UNSIGNED)"), "DESC"]],
+    });
+    let nextNumber = 1;
+    if (lastRate) {
+      const lastNumber = parseInt(lastRate.rate_id.slice(3), 10);
+      if (!isNaN(lastNumber)) nextNumber = lastNumber + 1;
+    }
     const newRateId = `UR-${nextNumber}`;
     const today = getCurrentDateTime();
     const updatedBy = req.user.user_fullname;
 
-    const sqlInsert = `
-      INSERT INTO utility_rate (
-        rate_id, erate_perKwH, e_vat, emin_con, wmin_con,
-        wrate_perCbM, wnet_vat, w_vat, l_rate, last_updated, updated_by
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `;
-    await query(sqlInsert, [
-      newRateId,
+    await Rate.create({
+      rate_id: newRateId,
       erate_perKwH,
       e_vat,
       emin_con,
@@ -76,9 +68,9 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
       wnet_vat,
       w_vat,
       l_rate,
-      today,
-      updatedBy
-    ]);
+      last_updated: today,
+      updated_by: updatedBy
+    });
 
     res.status(201).json({ message: 'Rate created successfully', rateId: newRateId });
   } catch (err) {
@@ -90,27 +82,36 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
 // CREATE ELECTRIC RATE
 router.post('/electric', authorizeRole('admin'), async (req, res) => {
   const { erate_perKwH, emin_con, e_vat } = req.body;
-  if (!erate_perKwH || !emin_con || !e_vat) {
+  if (
+    erate_perKwH === undefined ||
+    emin_con === undefined ||
+    e_vat === undefined
+  ) {
     return res.status(400).json({ error: 'All fields are required' });
   }
 
   try {
-    const results = await query(`
-      SELECT rate_id FROM utility_rate
-      WHERE rate_id LIKE 'R-%'
-      ORDER BY CAST(SUBSTRING(rate_id, 3) AS UNSIGNED) DESC
-      LIMIT 1
-    `);
-    const nextNumber = results.length > 0 ? parseInt(results[0].rate_id.slice(2), 10) + 1 : 1;
+    const lastRate = await Rate.findOne({
+      where: { rate_id: { [Op.like]: 'R-%' } },
+      order: [[literal("CAST(SUBSTRING(rate_id, 3) AS UNSIGNED)"), "DESC"]],
+    });
+    let nextNumber = 1;
+    if (lastRate) {
+      const lastNumber = parseInt(lastRate.rate_id.slice(2), 10);
+      if (!isNaN(lastNumber)) nextNumber = lastNumber + 1;
+    }
     const newRateId = `R-${nextNumber}`;
     const today = getCurrentDateTime();
     const updatedBy = req.user.user_fullname;
 
-    await query(`
-      INSERT INTO utility_rate (
-        rate_id, erate_perKwH, emin_con, e_vat, last_updated, updated_by
-      ) VALUES (?, ?, ?, ?, ?, ?)
-    `, [newRateId, erate_perKwH, emin_con, e_vat, today, updatedBy]);
+    await Rate.create({
+      rate_id: newRateId,
+      erate_perKwH,
+      emin_con,
+      e_vat,
+      last_updated: today,
+      updated_by: updatedBy
+    });
 
     res.status(201).json({ message: 'Electric rate created successfully', rateId: newRateId });
   } catch (err) {
@@ -122,27 +123,38 @@ router.post('/electric', authorizeRole('admin'), async (req, res) => {
 // CREATE WATER RATE
 router.post('/water', authorizeRole('admin'), async (req, res) => {
   const { wmin_con, wrate_perCbM, wnet_vat, w_vat } = req.body;
-  if (!wmin_con || !wrate_perCbM || !wnet_vat || !w_vat) {
+  if (
+    wmin_con === undefined ||
+    wrate_perCbM === undefined ||
+    wnet_vat === undefined ||
+    w_vat === undefined
+  ) {
     return res.status(400).json({ error: 'All fields are required' });
   }
 
   try {
-    const results = await query(`
-      SELECT rate_id FROM utility_rate
-      WHERE rate_id LIKE 'R-%'
-      ORDER BY CAST(SUBSTRING(rate_id, 3) AS UNSIGNED) DESC
-      LIMIT 1
-    `);
-    const nextNumber = results.length > 0 ? parseInt(results[0].rate_id.slice(2), 10) + 1 : 1;
+    const lastRate = await Rate.findOne({
+      where: { rate_id: { [Op.like]: 'R-%' } },
+      order: [[literal("CAST(SUBSTRING(rate_id, 3) AS UNSIGNED)"), "DESC"]],
+    });
+    let nextNumber = 1;
+    if (lastRate) {
+      const lastNumber = parseInt(lastRate.rate_id.slice(2), 10);
+      if (!isNaN(lastNumber)) nextNumber = lastNumber + 1;
+    }
     const newRateId = `R-${nextNumber}`;
     const today = getCurrentDateTime();
     const updatedBy = req.user.user_fullname;
 
-    await query(`
-      INSERT INTO utility_rate (
-        rate_id, wmin_con, wrate_perCbM, wnet_vat, w_vat, last_updated, updated_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `, [newRateId, wmin_con, wrate_perCbM, wnet_vat, w_vat, today, updatedBy]);
+    await Rate.create({
+      rate_id: newRateId,
+      wmin_con,
+      wrate_perCbM,
+      wnet_vat,
+      w_vat,
+      last_updated: today,
+      updated_by: updatedBy
+    });
 
     res.status(201).json({ message: 'Water rate created successfully', rateId: newRateId });
   } catch (err) {
@@ -154,27 +166,30 @@ router.post('/water', authorizeRole('admin'), async (req, res) => {
 // CREATE LPG RATE
 router.post('/lpg', authorizeRole('admin'), async (req, res) => {
   const { l_rate } = req.body;
-  if (!l_rate) {
+  if (l_rate === undefined) {
     return res.status(400).json({ error: 'LPG rate is required' });
   }
 
   try {
-    const results = await query(`
-      SELECT rate_id FROM utility_rate
-      WHERE rate_id LIKE 'R-%'
-      ORDER BY CAST(SUBSTRING(rate_id, 3) AS UNSIGNED) DESC
-      LIMIT 1
-    `);
-    const nextNumber = results.length > 0 ? parseInt(results[0].rate_id.slice(2), 10) + 1 : 1;
+    const lastRate = await Rate.findOne({
+      where: { rate_id: { [Op.like]: 'R-%' } },
+      order: [[literal("CAST(SUBSTRING(rate_id, 3) AS UNSIGNED)"), "DESC"]],
+    });
+    let nextNumber = 1;
+    if (lastRate) {
+      const lastNumber = parseInt(lastRate.rate_id.slice(2), 10);
+      if (!isNaN(lastNumber)) nextNumber = lastNumber + 1;
+    }
     const newRateId = `R-${nextNumber}`;
     const today = getCurrentDateTime();
     const updatedBy = req.user.user_fullname;
 
-    await query(`
-      INSERT INTO utility_rate (
-        rate_id, l_rate, last_updated, updated_by
-      ) VALUES (?, ?, ?, ?)
-    `, [newRateId, l_rate, today, updatedBy]);
+    await Rate.create({
+      rate_id: newRateId,
+      l_rate,
+      last_updated: today,
+      updated_by: updatedBy
+    });
 
     res.status(201).json({ message: 'LPG rate created successfully', rateId: newRateId });
   } catch (err) {
@@ -191,21 +206,16 @@ router.put('/electric/:id', authorizeRole('admin'), async (req, res) => {
   const lastUpdated = getCurrentDateTime();
 
   try {
-    const [existing] = await query('SELECT * FROM utility_rate WHERE rate_id = ?', [rateId]);
-    if (!existing) return res.status(404).json({ error: 'Rate not found' });
+    const rate = await Rate.findOne({ where: { rate_id: rateId } });
+    if (!rate) return res.status(404).json({ error: 'Rate not found' });
 
-    await query(`
-      UPDATE utility_rate SET
-        erate_perKwH = ?, emin_con = ?, e_vat = ?, last_updated = ?, updated_by = ?
-      WHERE rate_id = ?
-    `, [
-      erate_perKwH ?? existing.erate_perKwH,
-      emin_con ?? existing.emin_con,
-      e_vat ?? existing.e_vat,
-      lastUpdated,
-      updatedBy,
-      rateId
-    ]);
+    await rate.update({
+      erate_perKwH: erate_perKwH ?? rate.erate_perKwH,
+      emin_con: emin_con ?? rate.emin_con,
+      e_vat: e_vat ?? rate.e_vat,
+      last_updated: lastUpdated,
+      updated_by: updatedBy
+    });
 
     res.json({ message: `Electric rate with ID ${rateId} updated successfully` });
   } catch (err) {
@@ -222,22 +232,17 @@ router.put('/water/:id', authorizeRole('admin'), async (req, res) => {
   const lastUpdated = getCurrentDateTime();
 
   try {
-    const [existing] = await query('SELECT * FROM utility_rate WHERE rate_id = ?', [rateId]);
-    if (!existing) return res.status(404).json({ error: 'Rate not found' });
+    const rate = await Rate.findOne({ where: { rate_id: rateId } });
+    if (!rate) return res.status(404).json({ error: 'Rate not found' });
 
-    await query(`
-      UPDATE utility_rate SET
-        wmin_con = ?, wrate_perCbM = ?, wnet_vat = ?, w_vat = ?, last_updated = ?, updated_by = ?
-      WHERE rate_id = ?
-    `, [
-      wmin_con ?? existing.wmin_con,
-      wrate_perCbM ?? existing.wrate_perCbM,
-      wnet_vat ?? existing.wnet_vat,
-      w_vat ?? existing.w_vat,
-      lastUpdated,
-      updatedBy,
-      rateId
-    ]);
+    await rate.update({
+      wmin_con: wmin_con ?? rate.wmin_con,
+      wrate_perCbM: wrate_perCbM ?? rate.wrate_perCbM,
+      wnet_vat: wnet_vat ?? rate.wnet_vat,
+      w_vat: w_vat ?? rate.w_vat,
+      last_updated: lastUpdated,
+      updated_by: updatedBy
+    });
 
     res.json({ message: `Water rate with ID ${rateId} updated successfully` });
   } catch (err) {
@@ -254,14 +259,14 @@ router.put('/lpg/:id', authorizeRole('admin'), async (req, res) => {
   const lastUpdated = getCurrentDateTime();
 
   try {
-    const [existing] = await query('SELECT * FROM utility_rate WHERE rate_id = ?', [rateId]);
-    if (!existing) return res.status(404).json({ error: 'Rate not found' });
+    const rate = await Rate.findOne({ where: { rate_id: rateId } });
+    if (!rate) return res.status(404).json({ error: 'Rate not found' });
 
-    await query(`
-      UPDATE utility_rate SET
-        l_rate = ?, last_updated = ?, updated_by = ?
-      WHERE rate_id = ?
-    `, [l_rate ?? existing.l_rate, lastUpdated, updatedBy, rateId]);
+    await rate.update({
+      l_rate: l_rate ?? rate.l_rate,
+      last_updated: lastUpdated,
+      updated_by: updatedBy
+    });
 
     res.json({ message: `LPG rate with ID ${rateId} updated successfully` });
   } catch (err) {
@@ -282,28 +287,21 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const lastUpdated = getCurrentDateTime();
 
   try {
-    const [existing] = await query('SELECT * FROM utility_rate WHERE rate_id = ?', [rateId]);
-    if (!existing) return res.status(404).json({ error: 'Rate not found' });
+    const rate = await Rate.findOne({ where: { rate_id: rateId } });
+    if (!rate) return res.status(404).json({ error: 'Rate not found' });
 
-    await query(`
-      UPDATE utility_rate SET
-        erate_perKwH = ?, e_vat = ?, emin_con = ?,
-        wmin_con = ?, wrate_perCbM = ?, wnet_vat = ?, w_vat = ?,
-        l_rate = ?, last_updated = ?, updated_by = ?
-      WHERE rate_id = ?
-    `, [
-      erate_perKwH ?? existing.erate_perKwH,
-      e_vat ?? existing.e_vat,
-      emin_con ?? existing.emin_con,
-      wmin_con ?? existing.wmin_con,
-      wrate_perCbM ?? existing.wrate_perCbM,
-      wnet_vat ?? existing.wnet_vat,
-      w_vat ?? existing.w_vat,
-      l_rate ?? existing.l_rate,
-      lastUpdated,
-      updatedBy,
-      rateId
-    ]);
+    await rate.update({
+      erate_perKwH: erate_perKwH ?? rate.erate_perKwH,
+      e_vat: e_vat ?? rate.e_vat,
+      emin_con: emin_con ?? rate.emin_con,
+      wmin_con: wmin_con ?? rate.wmin_con,
+      wrate_perCbM: wrate_perCbM ?? rate.wrate_perCbM,
+      wnet_vat: wnet_vat ?? rate.wnet_vat,
+      w_vat: w_vat ?? rate.w_vat,
+      l_rate: l_rate ?? rate.l_rate,
+      last_updated: lastUpdated,
+      updated_by: updatedBy
+    });
 
     res.json({ message: `Rate with ID ${rateId} updated successfully` });
   } catch (err) {
@@ -317,12 +315,10 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   const rateId = req.params.id;
 
   try {
-    const results = await query('SELECT * FROM utility_rate WHERE rate_id = ?', [rateId]);
-    if (results.length === 0) {
+    const deleted = await Rate.destroy({ where: { rate_id: rateId } });
+    if (deleted === 0) {
       return res.status(404).json({ error: 'Rate not found' });
     }
-
-    await query('DELETE FROM utility_rate WHERE rate_id = ?', [rateId]);
     res.json({ message: `Rate with ID ${rateId} deleted successfully` });
   } catch (err) {
     console.error('Error in DELETE /rates/:id:', err);

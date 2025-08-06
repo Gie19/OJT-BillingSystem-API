@@ -1,12 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../db');
-const util = require('util');
 const { hashPassword } = require('../utils/hashPassword');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
 
-const query = util.promisify(db.query).bind(db);
+const User = require('../models/User');
 
 // All routes below require a valid token
 router.use(authenticateToken);
@@ -14,8 +12,8 @@ router.use(authenticateToken);
 // GET ALL USERS
 router.get('/', authorizeRole('admin'), async (req, res) => {
   try {
-    const results = await query('SELECT * FROM user_accounts');
-    res.json(results);
+    const users = await User.findAll();
+    res.json(users);
   } catch (err) {
     console.error('Database error:', err);
     res.status(500).json({ error: err.message });
@@ -24,15 +22,12 @@ router.get('/', authorizeRole('admin'), async (req, res) => {
 
 // GET USER BY ID
 router.get('/:id', authorizeRole('admin'), async (req, res) => {
-  const userId = req.params.id;
   try {
-    const results = await query('SELECT * FROM user_accounts WHERE user_id = ?', [userId]);
-
-    if (results.length === 0) {
+    const user = await User.findOne({ where: { user_id: req.params.id } });
+    if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
-
-    res.json(results[0]);
+    res.json(user);
   } catch (err) {
     console.error('Database error:', err);
     res.status(500).json({ error: err.message });
@@ -48,30 +43,30 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
   }
 
   try {
-    // Get highest USER- ID
-    const sqlFind = `
-      SELECT user_id FROM user_accounts
-      WHERE user_id LIKE 'USER-%'
-      ORDER BY CAST(SUBSTRING(user_id, 6) AS UNSIGNED) DESC
-      LIMIT 1
-    `;
-    const results = await query(sqlFind);
+    // Find highest USER- ID and generate the next one
+    const lastUser = await User.findOne({
+      where: { user_id: { [User.sequelize.Op.like]: 'USER-%' } },
+      order: [[User.sequelize.literal("CAST(SUBSTRING(user_id, 6) AS UNSIGNED)"), "DESC"]],
+    });
 
     let nextNumber = 1;
-    if (results.length > 0) {
-      const lastId = results[0].user_id;
-      const lastNumber = parseInt(lastId.slice(5), 10); // skip 'USER-'
-      nextNumber = lastNumber + 1;
+    if (lastUser) {
+      const lastNumber = parseInt(lastUser.user_id.slice(5), 10);
+      if (!isNaN(lastNumber)) nextNumber = lastNumber + 1;
     }
-
     const newUserId = `USER-${nextNumber}`;
+
+    // Hash password
     const hashedPassword = await hashPassword(user_password);
 
-    const sqlInsert = `
-      INSERT INTO user_accounts (user_id, user_password, user_fullname, user_level, building_id)
-      VALUES (?, ?, ?, ?, ?)
-    `;
-    await query(sqlInsert, [newUserId, hashedPassword, user_fullname, user_level, building_id]);
+    // Create user
+    await User.create({
+      user_id: newUserId,
+      user_password: hashedPassword,
+      user_fullname,
+      user_level,
+      building_id
+    });
 
     res.status(201).json({
       message: 'User created successfully',
@@ -92,13 +87,10 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   }
 
   try {
-    const sqlDelete = 'DELETE FROM user_accounts WHERE user_id = ?';
-    const result = await query(sqlDelete, [userId]);
-
-    if (result.affectedRows === 0) {
+    const deletedRows = await User.destroy({ where: { user_id: userId } });
+    if (deletedRows === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
-
     res.json({ message: `User with ID ${userId} deleted successfully` });
   } catch (err) {
     console.error('Error in DELETE /users/:id:', err);
@@ -112,29 +104,22 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const { user_password, user_fullname, user_level, building_id } = req.body;
 
   try {
-    const sqlGet = 'SELECT * FROM user_accounts WHERE user_id = ?';
-    const results = await query(sqlGet, [userId]);
-
-    if (results.length === 0) {
+    const user = await User.findOne({ where: { user_id: userId } });
+    if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const existing = results[0];
-    const finalFullname = user_fullname || existing.user_fullname;
-    const finalLevel = user_level || existing.user_level;
-    const finalBuildingId = building_id || existing.building_id;
+    const updatedFields = {
+      user_fullname: user_fullname || user.user_fullname,
+      user_level: user_level || user.user_level,
+      building_id: building_id || user.building_id,
+    };
 
-    let finalPassword = existing.user_password;
     if (user_password) {
-      finalPassword = await hashPassword(user_password);
+      updatedFields.user_password = await hashPassword(user_password);
     }
 
-    const sqlUpdate = `
-      UPDATE user_accounts
-      SET user_password = ?, user_fullname = ?, user_level = ?, building_id = ?
-      WHERE user_id = ?
-    `;
-    await query(sqlUpdate, [finalPassword, finalFullname, finalLevel, finalBuildingId, userId]);
+    await user.update(updatedFields);
 
     res.json({ message: `User with ID ${userId} updated successfully` });
   } catch (err) {

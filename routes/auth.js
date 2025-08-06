@@ -1,14 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
-const db = require('../db');
-const util = require('util');
 require('dotenv').config();
 
+const User = require('../models/User'); 
 const { comparePassword } = require('../utils/hashPassword');
-
-// Promisify DB queries
-const query = util.promisify(db.query).bind(db);
 
 // POST /auth/login
 router.post('/login', async (req, res) => {
@@ -19,14 +15,12 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    // Look up user in the database
-    const results = await query('SELECT * FROM user_accounts WHERE user_id = ?', [user_id]);
+    // Use Sequelize to look up user in the database
+    const user = await User.findOne({ where: { user_id } });
 
-    if (results.length === 0) {
+    if (!user) {
       return res.status(401).json({ error: 'No existing credentials' });
     }
-
-    const user = results[0];
 
     // Compare password using utility function
     const match = await comparePassword(user_password, user.user_password);

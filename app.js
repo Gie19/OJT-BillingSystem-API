@@ -5,33 +5,25 @@ var cookieParser = require('cookie-parser');
 var logger = require('morgan');
 var cors = require('cors');
 
-
-
-//Routers
+// Routers
 var indexRouter = require('./routes/index');
 var usersRouter = require('./routes/users');
 var authRouter = require('./routes/auth');
 var tenantsRouter = require('./routes/tenants');
 var stallsRouter = require('./routes/stalls');
 var meterRouter = require('./routes/meters');
-var stallsRouter = require('./routes/stalls');
 var readingsRouter = require('./routes/readings');
 var ratesRouter = require('./routes/rates');
 var buildingsRouter = require('./routes/buildings');
 var qrRouter = require('./routes/qr');
 
-
-
-//DB connection 
-const db = require('./db');
-
-
-const { error } = require('console');
-const { read } = require('fs');
-
+// Sequelize setup
+const sequelize = require('./models');
+sequelize.authenticate()
+  .then(() => console.log('Sequelize connected to MySQL!'))
+  .catch(err => console.error('Unable to connect to DB via Sequelize:', err));
 
 var app = express();
-
 
 app.use(cors());
 app.use(logger('dev'));
@@ -39,8 +31,6 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
-
-
 
 app.use('/', indexRouter);
 app.use('/users', usersRouter);
@@ -53,7 +43,6 @@ app.use('/rates', ratesRouter);
 app.use('/buildings', buildingsRouter);
 app.use('/qr', qrRouter);
 
-
 // catch 404 and forward to error handler
 app.use(function(req, res, next) {
   next(createError(404));
@@ -65,7 +54,6 @@ app.use(function(err, req, res, next) {
     message: err.message,
     error: req.app.get('env') === 'development' ? err : {}
   });
-
 });
 
 module.exports = app;
