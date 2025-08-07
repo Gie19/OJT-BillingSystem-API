@@ -3,7 +3,7 @@ const router = express.Router();
 const { hashPassword } = require('../utils/hashPassword');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
-
+const { Op, literal } = require('sequelize');
 const User = require('../models/User');
 
 // All routes below require a valid token
@@ -45,8 +45,8 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
   try {
     // Find highest USER- ID and generate the next one
     const lastUser = await User.findOne({
-      where: { user_id: { [User.sequelize.Op.like]: 'USER-%' } },
-      order: [[User.sequelize.literal("CAST(SUBSTRING(user_id, 6) AS UNSIGNED)"), "DESC"]],
+      where: { user_id: { [Op.like]: 'USER-%' } },
+      order: [[literal("CAST(SUBSTRING(user_id, 6) AS UNSIGNED)"), "DESC"]],
     });
 
     let nextNumber = 1;
