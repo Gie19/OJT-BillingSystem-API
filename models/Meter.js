@@ -14,7 +14,7 @@ const Meter = sequelize.define('Meter', {
   },
   stall_id: DataTypes.STRING,      // Foreign key (not null)
   meter_status: DataTypes.ENUM('active', 'inactive'),
-  qr_id: DataTypes.STRING,         // Foreign key (nullable)
+  // qr_id: DataTypes.STRING,     // REMOVED
   last_updated: {
     type: DataTypes.DATE,
     allowNull: false
