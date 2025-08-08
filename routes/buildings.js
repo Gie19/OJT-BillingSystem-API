@@ -3,9 +3,16 @@ const router = express.Router();
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
-const Building = require('../models/Building');
-const Rate = require('../models/Rate');
+
+
 const { Op, literal } = require('sequelize');
+
+//Models to be used for referencing
+const User = require('../models/User');
+const Tenant = require('../models/Tenant');
+const Stall = require('../models/Stall');
+const Rate = require('../models/Rate');
+const Building = require('../models/Building');
 
 // All routes below require valid token
 router.use(authenticateToken);
@@ -120,7 +127,7 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// DELETE BUILDING BY ID
+// DELETE BUILDING BY ID with checker if it is still referenced by User, Tenant, Stall
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   const buildingId = req.params.id;
 
@@ -129,6 +136,29 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   }
 
   try {
+    // Check for referencing records in User, Tenant, Stall
+    const [userRefs, tenantRefs, stallRefs] = await Promise.all([
+      User.findAll({ where: { building_id: buildingId }, attributes: ['user_id'] }),
+      Tenant.findAll({ where: { building_id: buildingId }, attributes: ['tenant_id'] }),
+      Stall.findAll({ where: { building_id: buildingId }, attributes: ['stall_id'] }),
+    ]);
+
+    const users = userRefs.map(u => u.user_id);
+    const tenants = tenantRefs.map(t => t.tenant_id);
+    const stalls = stallRefs.map(s => s.stall_id);
+
+    let errors = [];
+    if (users.length) errors.push(`User(s): [${users.join(', ')}]`);
+    if (tenants.length) errors.push(`Tenant(s): [${tenants.join(', ')}]`);
+    if (stalls.length) errors.push(`Stall(s): [${stalls.join(', ')}]`);
+
+    if (errors.length) {
+      return res.status(400).json({
+        error: `Cannot delete building. It is still referenced by: ${errors.join('; ')}`
+      });
+    }
+
+    // Safe to delete
     const deleted = await Building.destroy({ where: { building_id: buildingId } });
     if (deleted === 0) {
       return res.status(404).json({ error: 'Building not found' });

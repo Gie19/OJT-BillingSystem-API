@@ -3,8 +3,12 @@ const router = express.Router();
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
-const Tenant = require('../models/Tenant');
+
 const { Op, literal } = require('sequelize');
+
+//Models to be used for referencing
+const Tenant = require('../models/Tenant');
+const Stall = require('../models/Stall');
 
 // All routes below require valid token
 router.use(authenticateToken);
@@ -124,17 +128,36 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// DELETE TENANT BY ID
+// DELETE TENANT BY ID with dependency checks
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   const tenantId = req.params.id;
+
   if (!tenantId) {
     return res.status(400).json({ error: 'Tenant ID is required' });
   }
+
   try {
+    // Find all stalls using this tenant
+    const stalls = await Stall.findAll({
+      where: { tenant_id: tenantId },
+      attributes: ['stall_id']
+    });
+
+    if (stalls.length > 0) {
+      const stallIds = stalls.map(stall => stall.stall_id);
+      return res.status(400).json({
+        error: `Cannot delete tenant. This tenant is still assigned to the following stall(s):`,
+        stall_ids: stallIds
+      });
+    }
+
+    // Proceed with deletion
     const deleted = await Tenant.destroy({ where: { tenant_id: tenantId } });
+
     if (deleted === 0) {
       return res.status(404).json({ error: 'Tenant not found' });
     }
+
     res.json({ message: `Tenant with ID ${tenantId} deleted successfully` });
   } catch (err) {
     console.error('Error in DELETE /tenants/:id:', err);

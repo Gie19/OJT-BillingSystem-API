@@ -3,9 +3,13 @@ const router = express.Router();
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
+
+const { Op, literal } = require('sequelize');
+
+//Models to be used for referencing
 const Stall = require('../models/Stall');
 const Tenant = require('../models/Tenant');
-const { Op, literal } = require('sequelize');
+const Meter = require('../models/Meter');
 
 // All routes below require valid token
 router.use(authenticateToken);
@@ -147,7 +151,7 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// DELETE STALL BY ID
+// DELETE STALL BY ID with dependency check
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   const stallId = req.params.id;
 
@@ -156,6 +160,21 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   }
 
   try {
+    // Check if the stall_id is being used in Meter
+    const meters = await Meter.findAll({
+      where: { stall_id: stallId },
+      attributes: ['meter_id']
+    });
+
+    if (meters.length > 0) {
+      const meterIds = meters.map(m => m.meter_id);
+      return res.status(400).json({
+        error: `Cannot delete stall. This stall is still used by the following meter(s):`,
+        meter_ids: meterIds
+      });
+    }
+
+    // Safe to delete
     const deleted = await Stall.destroy({ where: { stall_id: stallId } });
     if (deleted === 0) {
       return res.status(404).json({ error: 'Stall not found' });
