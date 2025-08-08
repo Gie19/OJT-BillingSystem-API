@@ -1,9 +1,15 @@
 const express = require('express');
 const router = express.Router();
+
+//Import utilities and middleware
 const { hashPassword } = require('../utils/hashPassword');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
+
+//Import for sequelize operations
 const { Op, literal } = require('sequelize');
+
+//Imported models
 const User = require('../models/User');
 
 // All routes below require a valid token

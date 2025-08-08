@@ -1,10 +1,22 @@
 const express = require('express');
 const router = express.Router();
+
+//Import utilities and middleware
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
-const Rate = require('../models/Rate');
+
+
+//Import for sequelize operations
 const { Op, literal } = require('sequelize');
+
+
+
+//Imported models
+const Building = require('../models/Building');
+const Rate = require('../models/Rate');
+
+
 
 // All routes below require valid token
 router.use(authenticateToken);
@@ -310,11 +322,25 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// DELETE RATE
+// DELETE RATE with dependecy check
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   const rateId = req.params.id;
 
   try {
+    // Check if rate_id is used in any building
+    const buildings = await Building.findAll({
+      where: { rate_id: rateId },
+      attributes: ['building_id']
+    });
+
+    if (buildings.length > 0) {
+      const buildingIds = buildings.map(b => b.building_id);
+      return res.status(400).json({
+        error: 'Cannot delete utility rate. This rate is still used by the following building(s):',
+        building_ids: buildingIds
+      });
+    }
+
     const deleted = await Rate.destroy({ where: { rate_id: rateId } });
     if (deleted === 0) {
       return res.status(404).json({ error: 'Rate not found' });

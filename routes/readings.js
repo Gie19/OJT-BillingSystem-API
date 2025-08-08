@@ -1,11 +1,20 @@
 const express = require('express');
 const router = express.Router();
+
+//Import utilities and middleware
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
-const Reading = require('../models/Reading');
-const Meter = require('../models/Meter'); // For checking meter_id
+
+
+//Import for sequelize operations
 const { Op, literal } = require('sequelize');
+
+
+//Imported models
+const Reading = require('../models/Reading');
+const Meter = require('../models/Meter');
+
 
 // All routes below require valid token
 router.use(authenticateToken);

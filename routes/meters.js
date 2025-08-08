@@ -3,10 +3,14 @@ const router = express.Router();
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
+
+const { Op, literal } = require('sequelize');
+
+//Imported models
 const Meter = require('../models/Meter');
 const Stall = require('../models/Stall');
 const Qr = require('../models/Qr');
-const { Op, literal } = require('sequelize');
+const Reading = require('../models/Reading');
 
 // All routes below require valid token
 router.use(authenticateToken);
@@ -152,13 +156,27 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// DELETE METER BY ID
+//DELETE METER BY ID with dependency check
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   const meterId = req.params.id;
   if (!meterId) {
     return res.status(400).json({ error: 'Meter ID is required' });
   }
   try {
+    // Check if meter_id is used in meter_reading
+    const readings = await Reading.findAll({
+      where: { meter_id: meterId },
+      attributes: ['reading_id']
+    });
+
+    if (readings.length > 0) {
+      const readingIds = readings.map(r => r.reading_id);
+      return res.status(400).json({
+        error: `Cannot delete meter. This meter is still referenced by the following reading(s):`,
+        reading_ids: readingIds
+      });
+    }
+
     const deleted = await Meter.destroy({ where: { meter_id: meterId } });
     if (deleted === 0) {
       return res.status(404).json({ error: 'Meter not found' });

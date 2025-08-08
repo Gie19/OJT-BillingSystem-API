@@ -1,10 +1,19 @@
 const express = require('express');
 const router = express.Router();
+
+//Import utilities and middleware
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
-const Qr = require('../models/Qr');
+
+
+//Import for sequelize operations
 const { Op, literal } = require('sequelize');
+
+
+//Imported models
+const Meter = require('../models/Meter');
+const Qr = require('../models/Qr');
 
 // All routes below require a valid token
 router.use(authenticateToken);
@@ -89,11 +98,25 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// DELETE QR DETAILS BY ID
+// DELETE QR DETAILS BY ID with dependency check
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   const qrId = req.params.id;
 
   try {
+    // Check if qr_id is used in meter_list
+    const meters = await Meter.findAll({
+      where: { qr_id: qrId },
+      attributes: ['meter_id']
+    });
+
+    if (meters.length > 0) {
+      const meterIds = meters.map(m => m.meter_id);
+      return res.status(400).json({
+        error: `Cannot delete QR details. This QR code is still assigned to the following meter(s):`,
+        meter_ids: meterIds
+      });
+    }
+
     const deleted = await Qr.destroy({ where: { qr_id: qrId } });
     if (deleted === 0) {
       return res.status(404).json({ error: 'QR details not found' });

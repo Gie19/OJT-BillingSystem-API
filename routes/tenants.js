@@ -1,12 +1,15 @@
 const express = require('express');
 const router = express.Router();
+
+//Import utilities and middleware
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
 
+//Import for sequelize operations
 const { Op, literal } = require('sequelize');
 
-//Models to be used for referencing
+//Imported models
 const Tenant = require('../models/Tenant');
 const Stall = require('../models/Stall');
 
