@@ -134,38 +134,31 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
 // DELETE TENANT BY ID with dependency checks
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   const tenantId = req.params.id;
-
   if (!tenantId) {
     return res.status(400).json({ error: 'Tenant ID is required' });
   }
-
   try {
-    // Find all stalls using this tenant
-    const stalls = await Stall.findAll({
-      where: { tenant_id: tenantId },
-      attributes: ['stall_id']
-    });
+    const stalls = await Stall.findAll({ where: { tenant_id: tenantId }, attributes: ['stall_id'] });
 
-    if (stalls.length > 0) {
-      const stallIds = stalls.map(stall => stall.stall_id);
+    let errors = [];
+    if (stalls.length) errors.push(`Stall(s): [${stalls.map(stall => stall.stall_id).join(', ')}]`);
+
+    if (errors.length) {
       return res.status(400).json({
-        error: `Cannot delete tenant. This tenant is still assigned to the following stall(s):`,
-        stall_ids: stallIds
+        error: `Cannot delete tenant. It is still referenced by: ${errors.join('; ')}`
       });
     }
 
-    // Proceed with deletion
     const deleted = await Tenant.destroy({ where: { tenant_id: tenantId } });
-
     if (deleted === 0) {
       return res.status(404).json({ error: 'Tenant not found' });
     }
-
     res.json({ message: `Tenant with ID ${tenantId} deleted successfully` });
   } catch (err) {
     console.error('Error in DELETE /tenants/:id:', err);
     res.status(500).json({ error: err.message });
   }
 });
+
 
 module.exports = router;

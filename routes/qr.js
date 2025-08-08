@@ -101,19 +101,15 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
 // DELETE QR DETAILS BY ID with dependency check
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   const qrId = req.params.id;
-
   try {
-    // Check if qr_id is used in meter_list
-    const meters = await Meter.findAll({
-      where: { qr_id: qrId },
-      attributes: ['meter_id']
-    });
+    const meters = await Meter.findAll({ where: { qr_id: qrId }, attributes: ['meter_id'] });
 
-    if (meters.length > 0) {
-      const meterIds = meters.map(m => m.meter_id);
+    let errors = [];
+    if (meters.length) errors.push(`Meter(s): [${meters.map(m => m.meter_id).join(', ')}]`);
+
+    if (errors.length) {
       return res.status(400).json({
-        error: `Cannot delete QR details. This QR code is still assigned to the following meter(s):`,
-        meter_ids: meterIds
+        error: `Cannot delete QR. It is still referenced by: ${errors.join('; ')}`
       });
     }
 
@@ -128,5 +124,6 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 module.exports = router;

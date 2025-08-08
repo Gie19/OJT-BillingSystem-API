@@ -165,20 +165,17 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
 
   try {
     // Check if the stall_id is being used in Meter
-    const meters = await Meter.findAll({
-      where: { stall_id: stallId },
-      attributes: ['meter_id']
-    });
+    const meters = await Meter.findAll({ where: { stall_id: stallId }, attributes: ['meter_id'] });
 
-    if (meters.length > 0) {
-      const meterIds = meters.map(m => m.meter_id);
+    let errors = [];
+    if (meters.length) errors.push(`Meter(s): [${meters.map(m => m.meter_id).join(', ')}]`);
+
+    if (errors.length) {
       return res.status(400).json({
-        error: `Cannot delete stall. This stall is still used by the following meter(s):`,
-        meter_ids: meterIds
+        error: `Cannot delete stall. It is still referenced by: ${errors.join('; ')}`
       });
     }
 
-    // Safe to delete
     const deleted = await Stall.destroy({ where: { stall_id: stallId } });
     if (deleted === 0) {
       return res.status(404).json({ error: 'Stall not found' });
@@ -189,5 +186,6 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 module.exports = router;

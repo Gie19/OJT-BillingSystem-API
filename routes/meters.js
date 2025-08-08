@@ -163,17 +163,14 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
     return res.status(400).json({ error: 'Meter ID is required' });
   }
   try {
-    // Check if meter_id is used in meter_reading
-    const readings = await Reading.findAll({
-      where: { meter_id: meterId },
-      attributes: ['reading_id']
-    });
+    const readings = await Reading.findAll({ where: { meter_id: meterId }, attributes: ['reading_id'] });
 
-    if (readings.length > 0) {
-      const readingIds = readings.map(r => r.reading_id);
+    let errors = [];
+    if (readings.length) errors.push(`Reading(s): [${readings.map(r => r.reading_id).join(', ')}]`);
+
+    if (errors.length) {
       return res.status(400).json({
-        error: `Cannot delete meter. This meter is still referenced by the following reading(s):`,
-        reading_ids: readingIds
+        error: `Cannot delete meter. It is still referenced by: ${errors.join('; ')}`
       });
     }
 
@@ -187,5 +184,6 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 module.exports = router;

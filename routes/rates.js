@@ -325,19 +325,15 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
 // DELETE RATE with dependecy check
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   const rateId = req.params.id;
-
   try {
-    // Check if rate_id is used in any building
-    const buildings = await Building.findAll({
-      where: { rate_id: rateId },
-      attributes: ['building_id']
-    });
+    const buildings = await Building.findAll({ where: { rate_id: rateId }, attributes: ['building_id'] });
 
-    if (buildings.length > 0) {
-      const buildingIds = buildings.map(b => b.building_id);
+    let errors = [];
+    if (buildings.length) errors.push(`Building(s): [${buildings.map(b => b.building_id).join(', ')}]`);
+
+    if (errors.length) {
       return res.status(400).json({
-        error: 'Cannot delete utility rate. This rate is still used by the following building(s):',
-        building_ids: buildingIds
+        error: `Cannot delete utility rate. It is still referenced by: ${errors.join('; ')}`
       });
     }
 
@@ -351,5 +347,6 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 module.exports = router;
