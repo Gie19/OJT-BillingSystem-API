@@ -1,60 +1,87 @@
 const express = require('express');
 const router = express.Router();
 
-//Import utilities and middleware
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
+const { attachBuildingScope, enforceRecordBuilding } = require('../middleware/authorizeBuilding');
 
-//Import for sequelize operations
 const { Op, literal } = require('sequelize');
 
-//Imported models
 const Tenant = require('../models/Tenant');
 const Stall = require('../models/Stall');
 
 // All routes below require valid token
 router.use(authenticateToken);
 
-// GET ALL TENANTS
-router.get('/', authorizeRole('admin','employee'), async (req, res) => {
-  try {
-    const tenants = await Tenant.findAll();
-    res.json(tenants);
-  } catch (err) {
-    console.error('Database error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
+/**
+ * GET ALL TENANTS
+ * - Admins: return all tenants
+ * - Employees: only tenants in their assigned building_id
+ * - If none visible, return 403 with message
+ */
+router.get('/',
+  authorizeRole('admin','employee'),
+  attachBuildingScope(),
+  async (req, res) => {
+    try {
+      const where = req.buildingWhere ? req.buildingWhere() : {};
+      const tenants = await Tenant.findAll({ where });
 
-// GET TENANT BY ID
-router.get('/:id', authorizeRole('admin'), async (req, res) => {
-  try {
-    const tenant = await Tenant.findOne({ where: { tenant_id: req.params.id } });
-    if (!tenant) {
-      return res.status(404).json({ message: 'Tenant not found' });
+      if (!tenants.length && req.restrictToBuildingId) {
+        return res.status(403).json({
+          error: 'No access: There are no tenants under your assigned building.'
+        });
+      }
+
+      res.json(tenants);
+    } catch (err) {
+      console.error('Database error:', err);
+      res.status(500).json({ error: err.message });
     }
-    res.json(tenant);
-  } catch (err) {
-    console.error('Database error:', err);
-    res.status(500).json({ error: err.message });
   }
-});
+);
 
-// CREATE NEW TENANT
+/**
+ * GET TENANT BY ID
+ * - Admins: full access
+ * - Employees: only if tenant.building_id === req.user.building_id
+ * - If exists but not in building → 403 with message
+ */
+router.get('/:id',
+  authorizeRole('admin','employee'),
+  enforceRecordBuilding(async (req) => {
+    const tenant = await Tenant.findOne({
+      where: { tenant_id: req.params.id },
+      attributes: ['building_id'],
+      raw: true
+    });
+    return tenant ? tenant.building_id : null; // null lets handler 404 if not found
+  }),
+  async (req, res) => {
+    try {
+      const tenant = await Tenant.findOne({ where: { tenant_id: req.params.id } });
+      if (!tenant) return res.status(404).json({ message: 'Tenant not found' });
+      res.json(tenant);
+    } catch (err) {
+      console.error('Database error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+// CREATE NEW TENANT (admin)
 router.post('/', authorizeRole('admin'), async (req, res) => {
   const { tenant_sn, tenant_name, building_id, bill_start } = req.body;
   if (!tenant_sn || !tenant_name || !building_id || !bill_start) {
     return res.status(400).json({ error: 'All fields are required' });
   }
   try {
-    // Check for duplicate tenant_sn
     const exists = await Tenant.findOne({ where: { tenant_sn } });
     if (exists) {
       return res.status(409).json({ error: 'Tenant SN already exists. Please use a unique tenant SN.' });
     }
 
-    // Find highest TNT-numbered id
     const lastTenant = await Tenant.findOne({
       where: { tenant_id: { [Op.like]: 'TNT-%' } },
       order: [[literal("CAST(SUBSTRING(tenant_id, 5) AS UNSIGNED)"), "DESC"]],
@@ -69,7 +96,6 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
     const today = getCurrentDateTime();
     const updatedBy = req.user?.user_fullname;
 
-    // Create new tenant
     await Tenant.create({
       tenant_id: newTenantId,
       tenant_sn,
@@ -87,7 +113,7 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// UPDATE TENANT BY ID
+// UPDATE TENANT BY ID (admin)
 router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const tenantId = req.params.id;
   const { tenant_sn, tenant_name, building_id, bill_start } = req.body;
@@ -95,26 +121,20 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const lastUpdated = getCurrentDateTime();
 
   try {
-    // Fetch existing record to support partial updates
     const tenant = await Tenant.findOne({ where: { tenant_id: tenantId } });
     if (!tenant) {
       return res.status(404).json({ error: 'Tenant not found' });
     }
 
-    // Only check for uniqueness if tenant_sn is being updated and is different
     if (tenant_sn && tenant_sn !== tenant.tenant_sn) {
       const snExists = await Tenant.findOne({
-        where: {
-          tenant_sn,
-          tenant_id: { [Op.ne]: tenantId }
-        }
+        where: { tenant_sn, tenant_id: { [Op.ne]: tenantId } }
       });
       if (snExists) {
         return res.status(409).json({ error: 'Tenant SN already exists. Please use a unique tenant SN.' });
       }
     }
 
-    // Update
     await tenant.update({
       tenant_sn: tenant_sn || tenant.tenant_sn,
       tenant_name: tenant_name || tenant.tenant_name,
@@ -131,7 +151,7 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// DELETE TENANT BY ID with dependency checks
+// DELETE TENANT BY ID (admin) with dependency checks
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   const tenantId = req.params.id;
   if (!tenantId) {
@@ -159,6 +179,5 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 
 module.exports = router;

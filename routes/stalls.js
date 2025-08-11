@@ -1,16 +1,13 @@
 const express = require('express');
 const router = express.Router();
 
-//Import utilities and middleware
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
+const { attachBuildingScope, enforceRecordBuilding } = require('../middleware/authorizeBuilding');
 
-
-//Import for sequelize operations
 const { Op, literal } = require('sequelize');
 
-//Imported models
 const Stall = require('../models/Stall');
 const Tenant = require('../models/Tenant');
 const Meter = require('../models/Meter');
@@ -18,19 +15,64 @@ const Meter = require('../models/Meter');
 // All routes below require valid token
 router.use(authenticateToken);
 
-// GET ALL STALLS
-router.get('/', authorizeRole('admin','employee'), async (req, res) => {
-  try {
-    const stalls = await Stall.findAll();
-    res.json(stalls);
-  } catch (err) {
-    console.error('Database error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
+/**
+ * GET ALL STALLS
+ * - Admins: return all stalls
+ * - Employees: only stalls in their assigned building_id
+ * - If none visible, return 403 with message
+ */
+router.get('/',
+  authorizeRole('admin','employee'),
+  attachBuildingScope(),
+  async (req, res) => {
+    try {
+      const where = req.buildingWhere ? req.buildingWhere() : {};
+      const stalls = await Stall.findAll({ where });
 
-// CREATE NEW STALL
-router.post('/', authorizeRole('admin'), async (req, res) => {
+      if (!stalls.length && req.restrictToBuildingId) {
+        return res.status(403).json({
+          error: 'No access: There are no stalls under your assigned building.'
+        });
+      }
+
+      res.json(stalls);
+    } catch (err) {
+      console.error('Database error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+/**
+ * GET STALL BY ID
+ * - Admins: full access
+ * - Employees: only if stall.building_id === req.user.building_id
+ * - If exists but not in building → 403 with message
+ */
+router.get('/:id',
+  authorizeRole('admin','employee'),
+  enforceRecordBuilding(async (req) => {
+    const stall = await Stall.findOne({
+      where: { stall_id: req.params.id },
+      attributes: ['building_id'],
+      raw: true
+    });
+    return stall ? stall.building_id : null;
+  }),
+  async (req, res) => {
+    try {
+      const stall = await Stall.findOne({ where: { stall_id: req.params.id } });
+      if (!stall) return res.status(404).json({ message: 'Stall not found' });
+      res.json(stall);
+    } catch (err) {
+      console.error('Database error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+// CREATE NEW STALL (kept your roles)
+router.post('/', authorizeRole('admin','employee'), async (req, res) => {
   const { stall_sn, tenant_id, building_id, stall_status } = req.body;
 
   if (!stall_sn || !building_id || !stall_status) {
@@ -38,13 +80,11 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
   }
 
   try {
-    // Uniqueness check for stall_sn
     const exists = await Stall.findOne({ where: { stall_sn } });
     if (exists) {
       return res.status(409).json({ error: 'stall_sn already exists. Please use a unique stall_sn.' });
     }
 
-    // Generate custom STL- ID (stall_id)
     const lastStall = await Stall.findOne({
       where: { stall_id: { [Op.like]: 'STL-%' } },
       order: [[literal("CAST(SUBSTRING(stall_id, 5) AS UNSIGNED)"), "DESC"]],
@@ -52,20 +92,18 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
 
     let nextNumber = 1;
     if (lastStall) {
-      const lastNumber = parseInt(lastStall.stall_id.slice(4), 10); // skip 'STL-'
+      const lastNumber = parseInt(lastStall.stall_id.slice(4), 10);
       if (!isNaN(lastNumber)) nextNumber = lastNumber + 1;
     }
     const newStallId = `STL-${nextNumber}`;
     const today = getCurrentDateTime();
     const updatedBy = req.user.user_fullname;
 
-    // tenant_id is nullable if status is 'available'
     let finalTenantId = tenant_id;
     if (stall_status === 'available') {
       finalTenantId = null;
     }
 
-    // If there's a tenant_id, validate it exists
     if (finalTenantId) {
       const tenant = await Tenant.findOne({ where: { tenant_id: finalTenantId } });
       if (!tenant) {
@@ -73,7 +111,6 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
       }
     }
 
-    // Create new stall
     await Stall.create({
       stall_id: newStallId,
       stall_sn,
@@ -91,7 +128,7 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// UPDATE STALL BY stall_id
+// UPDATE STALL BY ID (admin)
 router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const stallId = req.params.id;
   const { stall_sn, tenant_id, building_id, stall_status } = req.body;
@@ -99,38 +136,29 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const lastUpdated = getCurrentDateTime();
 
   try {
-    // Fetch existing record
     const stall = await Stall.findOne({ where: { stall_id: stallId } });
-
     if (!stall) {
       return res.status(404).json({ error: 'Stall not found' });
     }
 
-    // If stall_sn is being changed, ensure uniqueness
     if (stall_sn && stall_sn !== stall.stall_sn) {
       const exists = await Stall.findOne({
-        where: {
-          stall_sn,
-          stall_id: { [Op.ne]: stallId }
-        }
+        where: { stall_sn, stall_id: { [Op.ne]: stallId } }
       });
       if (exists) {
         return res.status(409).json({ error: 'stall_sn already exists. Please use a unique stall_sn.' });
       }
     }
 
-    // Determine final field values
     const finalStallSn = stall_sn || stall.stall_sn;
     let finalTenantId = tenant_id !== undefined ? tenant_id : stall.tenant_id;
     const finalBuildingId = building_id || stall.building_id;
     const finalStallStatus = stall_status || stall.stall_status;
 
-    // If status is "available" → tenant_id must be null
     if (finalStallStatus === 'available') {
       finalTenantId = null;
     }
 
-    // If there's a tenant_id, validate it exists
     if (finalTenantId) {
       const tenant = await Tenant.findOne({ where: { tenant_id: finalTenantId } });
       if (!tenant) {
@@ -138,7 +166,6 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
       }
     }
 
-    // Update
     await stall.update({
       stall_sn: finalStallSn,
       tenant_id: finalTenantId,
@@ -155,7 +182,7 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// DELETE STALL BY ID with dependency check
+// DELETE STALL BY ID (admin) with dependency check
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   const stallId = req.params.id;
 
@@ -164,7 +191,6 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   }
 
   try {
-    // Check if the stall_id is being used in Meter
     const meters = await Meter.findAll({ where: { stall_id: stallId }, attributes: ['meter_id'] });
 
     let errors = [];
@@ -186,6 +212,5 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 
 module.exports = router;
