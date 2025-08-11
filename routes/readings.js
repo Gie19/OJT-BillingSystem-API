@@ -20,7 +20,7 @@ const Meter = require('../models/Meter');
 router.use(authenticateToken);
 
 // GET ALL METER READINGS
-router.get('/', authorizeRole('admin', 'personnel'), async (req, res) => {
+router.get('/', authorizeRole('admin', 'employee'), async (req, res) => {
   try {
     const readings = await Reading.findAll();
     res.json(readings);
@@ -31,7 +31,7 @@ router.get('/', authorizeRole('admin', 'personnel'), async (req, res) => {
 });
 
 // GET METER READING BY ID
-router.get('/:id', authorizeRole('admin', 'personnel'), async (req, res) => {
+router.get('/:id', authorizeRole('admin', 'employee'), async (req, res) => {
   try {
     const reading = await Reading.findOne({ where: { reading_id: req.params.id } });
     if (!reading) {
@@ -45,7 +45,7 @@ router.get('/:id', authorizeRole('admin', 'personnel'), async (req, res) => {
 });
 
 // CREATE NEW METER READING
-router.post('/', authorizeRole('admin', 'personnel'), async (req, res) => {
+router.post('/', authorizeRole('admin', 'employee'), async (req, res) => {
   const { meter_id, prev_reading, curr_reading } = req.body;
 
   if (!meter_id) {
@@ -106,7 +106,7 @@ router.post('/', authorizeRole('admin', 'personnel'), async (req, res) => {
 });
 
 // UPDATE METER READING BY ID
-router.put('/:id', authorizeRole('admin', 'personnel'), async (req, res) => {
+router.put('/:id', authorizeRole('admin', 'employee'), async (req, res) => {
   const readingId = req.params.id;
   const { meter_id, prev_reading, curr_reading } = req.body;
   const updatedBy = req.user.user_fullname;
@@ -181,7 +181,7 @@ router.put('/:id', authorizeRole('admin', 'personnel'), async (req, res) => {
 });
 
 // DELETE METER READING BY ID
-router.delete('/:id', authorizeRole('admin', 'personnel'), async (req, res) => {
+router.delete('/:id', authorizeRole('admin', 'employee'), async (req, res) => {
   const readingId = req.params.id;
   if (!readingId) {
     return res.status(400).json({ error: 'Reading ID is required' });
