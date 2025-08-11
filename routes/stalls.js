@@ -19,7 +19,7 @@ const Meter = require('../models/Meter');
 router.use(authenticateToken);
 
 // GET ALL STALLS
-router.get('/', authorizeRole('admin'), async (req, res) => {
+router.get('/', authorizeRole('admin','employee'), async (req, res) => {
   try {
     const stalls = await Stall.findAll();
     res.json(stalls);

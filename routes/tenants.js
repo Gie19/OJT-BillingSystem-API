@@ -17,7 +17,7 @@ const Stall = require('../models/Stall');
 router.use(authenticateToken);
 
 // GET ALL TENANTS
-router.get('/', authorizeRole('admin'), async (req, res) => {
+router.get('/', authorizeRole('admin','employee'), async (req, res) => {
   try {
     const tenants = await Tenant.findAll();
     res.json(tenants);

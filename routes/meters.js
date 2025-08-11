@@ -15,7 +15,7 @@ const Reading = require('../models/Reading');
 router.use(authenticateToken);
 
 // GET ALL METERS
-router.get('/', authorizeRole('admin'), async (req, res) => {
+router.get('/', authorizeRole('admin','employee'), async (req, res) => {
   try {
     const meters = await Meter.findAll();
     res.json(meters);
