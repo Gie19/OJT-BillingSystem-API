@@ -159,66 +159,45 @@ router.get('/:id',
 router.post('/',
   authorizeRole('admin', 'employee'),
   async (req, res) => {
-    const { meter_id, prev_reading, curr_reading } = req.body;
-
-    if (!meter_id) {
-      return res.status(400).json({ error: 'meter_id is required' });
+    const { meter_id, reading_value } = req.body;
+    if (!meter_id || reading_value === undefined) {
+      return res.status(400).json({ error: 'meter_id and reading_value are required' });
     }
 
-    const safePrev = (prev_reading !== undefined && prev_reading !== null && prev_reading !== '') ? prev_reading : 0.00;
-    const safeCurr = (curr_reading !== undefined && curr_reading !== null && curr_reading !== '') ? curr_reading : 0.00;
-
     try {
-      // Validate meter_id exists
       const meter = await Meter.findOne({ where: { meter_id } });
-      if (!meter) {
-        return res.status(404).json({ error: 'Meter not found' });
-      }
+      if (!meter) return res.status(404).json({ error: 'Meter not found' });
 
-      // Employee scope check
       if (!isAdmin(req)) {
         const userBldg = req.user?.building_id;
-        if (!userBldg) {
-          return res.status(401).json({ error: 'Unauthorized: No building assigned' });
-        }
+        if (!userBldg) return res.status(401).json({ error: 'Unauthorized: No building assigned' });
         const meterBldg = await getMeterBuildingId(meter_id);
         if (!meterBldg || meterBldg !== userBldg) {
-          return res.status(403).json({
-            error: 'No access: You can only create readings for meters under your assigned building.'
-          });
+          return res.status(403).json({ error: 'No access: You can only create readings for meters under your assigned building.' });
         }
       }
 
-      // Get next reading_id
       const lastReading = await Reading.findOne({
         where: { reading_id: { [Op.like]: 'MR-%' } },
         order: [[literal("CAST(SUBSTRING(reading_id, 4) AS UNSIGNED)"), "DESC"]],
       });
-
       let nextNumber = 1;
       if (lastReading) {
         const lastNumber = parseInt(lastReading.reading_id.slice(3), 10);
         if (!isNaN(lastNumber)) nextNumber = lastNumber + 1;
       }
+
       const newReadingId = `MR-${nextNumber}`;
       const now = getCurrentDateTime();
       const updatedBy = req.user.user_fullname;
 
-      // Determine lastread_date and read_by
-      let lastread_date = null;
-      let read_by = null;
-
-      const bothZero = parseFloat(safePrev) === 0.00 && parseFloat(safeCurr) === 0.00;
-      if (!bothZero) {
-        lastread_date = now;
-        read_by = updatedBy;
-      }
+      const lastread_date = parseFloat(reading_value) !== 0.00 ? now : null;
+      const read_by = parseFloat(reading_value) !== 0.00 ? updatedBy : null;
 
       await Reading.create({
         reading_id: newReadingId,
         meter_id,
-        prev_reading: safePrev,
-        curr_reading: safeCurr,
+        reading_value,
         lastread_date,
         read_by,
         last_updated: now,
@@ -233,6 +212,7 @@ router.post('/',
   }
 );
 
+
 /**
  * UPDATE METER READING BY ID
  * - Admins: unrestricted
@@ -244,90 +224,53 @@ router.put('/:id',
   authorizeRole('admin', 'employee'),
   async (req, res) => {
     const readingId = req.params.id;
-    const { meter_id, prev_reading, curr_reading } = req.body;
+    const { meter_id, reading_value } = req.body;
     const updatedBy = req.user.user_fullname;
     const now = getCurrentDateTime();
 
     try {
       const reading = await Reading.findOne({ where: { reading_id: readingId } });
-      if (!reading) {
-        return res.status(404).json({ error: 'Reading not found' });
-      }
+      if (!reading) return res.status(404).json({ error: 'Reading not found' });
 
-      // Employee scope checks
       if (!isAdmin(req)) {
         const userBldg = req.user?.building_id;
-        if (!userBldg) {
-          return res.status(401).json({ error: 'Unauthorized: No building assigned' });
-        }
+        if (!userBldg) return res.status(401).json({ error: 'Unauthorized: No building assigned' });
 
-        // 1) Existing reading must be under employee's building
         const currentBldg = await getReadingBuildingId(readingId);
         if (!currentBldg || currentBldg !== userBldg) {
-          return res.status(403).json({
-            error: 'No access: You can only update readings under your assigned building.'
-          });
+          return res.status(403).json({ error: 'No access: You can only update readings under your assigned building.' });
         }
 
-        // 2) If meter_id is changing, the target meter must also be under employee's building
         if (meter_id && meter_id !== reading.meter_id) {
           const newMeterExists = await Meter.findOne({ where: { meter_id } });
-          if (!newMeterExists) {
-            return res.status(400).json({ error: 'Invalid meter_id: Meter does not exist.' });
-          }
+          if (!newMeterExists) return res.status(400).json({ error: 'Invalid meter_id: Meter does not exist.' });
           const newMeterBldg = await getMeterBuildingId(meter_id);
           if (!newMeterBldg || newMeterBldg !== userBldg) {
-            return res.status(403).json({
-              error: 'No access: The new meter is not under your assigned building.'
-            });
+            return res.status(403).json({ error: 'No access: The new meter is not under your assigned building.' });
           }
         }
       }
 
-      // Existing logic for update
-      const isMeterIdChanged = meter_id && meter_id !== reading.meter_id;
-      const finalPrevReading = (prev_reading !== undefined && prev_reading !== null && prev_reading !== '')
-        ? prev_reading : (prev_reading === undefined ? reading.prev_reading : 0.00);
-      const finalCurrReading = (curr_reading !== undefined && curr_reading !== null && curr_reading !== '')
-        ? curr_reading : (curr_reading === undefined ? reading.curr_reading : 0.00);
-
-      const isReadingChanged =
-        (prev_reading !== undefined && finalPrevReading !== reading.prev_reading) ||
-        (curr_reading !== undefined && finalCurrReading !== reading.curr_reading);
-
-      if (!isMeterIdChanged && !isReadingChanged) {
+      if (!meter_id && reading_value === undefined) {
         return res.status(400).json({ message: 'No changes detected in the request body.' });
       }
 
-      let lastread_date = reading.lastread_date;
-      let read_by = reading.read_by;
-      if (isReadingChanged) {
-        if (parseFloat(finalPrevReading) === 0.00 && parseFloat(finalCurrReading) === 0.00) {
-          lastread_date = null;
-          read_by = null;
+      if (meter_id) reading.meter_id = meter_id;
+      if (reading_value !== undefined) {
+        reading.reading_value = reading_value;
+        if (parseFloat(reading_value) === 0.00) {
+          reading.lastread_date = null;
+          reading.read_by = null;
         } else {
-          lastread_date = now;
-          read_by = updatedBy;
+          reading.lastread_date = now;
+          reading.read_by = updatedBy;
         }
       }
 
-      const updateObj = {};
-      if (isMeterIdChanged) updateObj.meter_id = meter_id;
-      if (isReadingChanged) {
-        updateObj.prev_reading = finalPrevReading;
-        updateObj.curr_reading = finalCurrReading;
-        updateObj.lastread_date = lastread_date;
-        updateObj.read_by = read_by;
-        updateObj.last_updated = now;
-        updateObj.updated_by = updatedBy;
-      }
-      if (isMeterIdChanged && !isReadingChanged) {
-        updateObj.last_updated = now;
-        updateObj.updated_by = updatedBy;
-      }
+      reading.last_updated = now;
+      reading.updated_by = updatedBy;
 
-      await reading.update(updateObj);
-
+      await reading.save();
       res.json({ message: `Reading with ID ${readingId} updated successfully` });
     } catch (err) {
       console.error('Error in PUT /meter_reading/:id:', err);
@@ -335,6 +278,7 @@ router.put('/:id',
     }
   }
 );
+
 
 /**
  * DELETE METER READING BY ID

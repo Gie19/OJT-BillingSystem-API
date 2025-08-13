@@ -98,6 +98,67 @@ router.get('/:id',
   }
 );
 
+// GET latest consumption & change_rate for a meter
+router.get('/:id/computation', authorizeRole('admin', 'employee'), async (req, res) => {
+  try {
+    const meterId = req.params.id;
+
+    // 1) Ensure meter exists
+    const meter = await Meter.findOne({ where: { meter_id: meterId } });
+    if (!meter) return res.status(404).json({ error: 'Meter not found' });
+
+    // 2) If employee, enforce building scope via Stall -> building_id
+    if ((req.user?.user_level || '').toLowerCase() !== 'admin') {
+      const stall = await Stall.findOne({ where: { stall_id: meter.stall_id }, attributes: ['building_id'], raw: true });
+      if (!stall || stall.building_id !== req.user?.building_id) {
+        return res.status(403).json({ error: 'No access: This meter is not under your assigned building.' });
+      }
+    }
+
+    // 3) Get last up-to-3 readings (most recent first)
+    const rows = await Reading.findAll({
+      where: { meter_id: meterId },
+      order: [['lastread_date', 'DESC'], ['reading_id', 'DESC']],
+      limit: 3
+    });
+
+    if (rows.length < 2) {
+      return res.json({ meter_id: meterId, note: 'Not enough data for consumption.' });
+    }
+
+    // 4) Compute using meter multiplier
+    const mult = Number(meter.meter_mult) || 1.0;
+
+    const v0 = Number(rows[0].reading_value) || 0;
+    const v1 = Number(rows[1].reading_value) || 0;
+    const v2 = rows[2] ? (Number(rows[2].reading_value) || 0) : null;
+
+    const deltaLatest = v0 - v1;
+    const deltaPrev   = v2 !== null ? (v1 - v2) : null;
+
+    const consumption_latest = deltaLatest * mult;
+const consumption_prev   = deltaPrev !== null ? (deltaPrev * mult) : null;
+
+const change_rate = consumption_prev !== 0 && consumption_prev !== null
+  ? ((consumption_latest - consumption_prev) / consumption_prev) * 100
+  : null;
+
+// rounding
+const round = (num, dec) => num !== null ? Number(num.toFixed(dec)) : null;
+
+res.json({
+  meter_id: meterId,
+  consumption_latest: round(consumption_latest, 2),
+  consumption_prev: round(consumption_prev, 2),
+  change_rate: round(change_rate, 1)
+});
+  } catch (err) {
+    console.error('Computation error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 
 // CREATE NEW METER (admin only)
 router.post('/',
