@@ -100,15 +100,13 @@ router.get('/:id',
   }
 );
 
-// GET latest consumption, % change, and bill totals (electric, water, LPG)
+// GET latest consumption, % change, base/vat breakdown, and totals (electric, water, LPG)
 router.get('/:id/computation', authorizeRole('admin', 'employee'), async (req, res) => {
   try {
     const meterId = req.params.id;
 
-    // Utility
-    const round = (num, dec) => (num === null || num === undefined)
-      ? null
-      : Number(Number(num).toFixed(dec));
+    // helpers
+    const round = (num, dec) => (num === null || num === undefined) ? null : Number(Number(num).toFixed(dec));
     const isAdmin = (req.user?.user_level || '').toLowerCase() === 'admin';
 
     // 1) Load meter
@@ -131,7 +129,7 @@ router.get('/:id/computation', authorizeRole('admin', 'employee'), async (req, r
       }
     }
 
-    // 3) Fetch last 3 readings (latest first)
+    // 3) Fetch last up-to-3 readings (latest first)
     const rows = await Reading.findAll({
       where: { meter_id: meterId },
       order: [['lastread_date', 'DESC'], ['reading_id', 'DESC']],
@@ -139,23 +137,11 @@ router.get('/:id/computation', authorizeRole('admin', 'employee'), async (req, r
       raw: true
     });
 
-    if (rows.length < 2) {
-      return res.json({ meter_id: meterId, note: 'Not enough data for consumption.' });
+    if (rows.length < 1) {
+      return res.json({ meter_id: meterId, note: 'No readings found.' });
     }
 
-    // 4) Compute consumptions with multiplier
-    const mult = Number(meter.meter_mult) || 1.0;
-    const v0 = Number(rows[0].reading_value) || 0;
-    const v1 = Number(rows[1].reading_value) || 0;
-    const v2 = rows[2] ? (Number(rows[2].reading_value) || 0) : null;
-
-    const deltaLatest = v0 - v1;
-    const deltaPrev   = v2 !== null ? (v1 - v2) : null;
-
-    let consumption_latest = deltaLatest * mult;
-    let consumption_prev   = deltaPrev !== null ? (deltaPrev * mult) : null;
-
-    // 5) Get building's utility rates
+    // 4) Get building's utility rates
     const building = await Building.findOne({
       where: { building_id: stall.building_id },
       attributes: ['rate_id'],
@@ -166,73 +152,120 @@ router.get('/:id/computation', authorizeRole('admin', 'employee'), async (req, r
     const rate = await Rate.findOne({ where: { rate_id: building.rate_id }, raw: true });
     if (!rate) return res.status(400).json({ error: 'Utility rate not found for building' });
 
-    // 6) Apply min consumption by meter type
+    // 5) Prepare values
     const mtype = (meter.meter_type || '').toLowerCase();
-    if (mtype === 'electric') {
-      const emin = Number(rate.emin_con) || 0;
-      if (consumption_latest <= 0) consumption_latest = emin;
-      if (consumption_prev !== null && consumption_prev <= 0) consumption_prev = emin;
-    } else if (mtype === 'water') {
-      const wmin = Number(rate.wmin_con) || 0;
-      if (consumption_latest <= 0) consumption_latest = wmin;
-      if (consumption_prev !== null && consumption_prev <= 0) consumption_prev = wmin;
+    const mult = Number(meter.meter_mult) || 1.0;
+
+    const v0 = Number(rows[0].reading_value) || 0;                  // latest reading_value
+    const v1 = rows[1] ? (Number(rows[1].reading_value) || 0) : null; // previous reading_value
+    const v2 = rows[2] ? (Number(rows[2].reading_value) || 0) : null; // third reading_value (optional)
+
+    let consumption_latest = null;
+    let consumption_prev   = null;
+    let raw_change_rate    = null;
+
+    // breakdowns
+    let base_latest = null, vat_latest = null, bill_latest_total = null;
+    let base_prev   = null, vat_prev   = null, bill_prev_total   = null;
+
+    if (mtype === 'lpg') {
+      // LPG: Billing uses RAW reading_value × lrate_perKg (no deltas)
+      const lrate = Number(rate.lrate_perKg ?? rate.l_rate) || 0; // support either column name
+
+      // For visibility, expose "consumption" as the raw reading_value
+      consumption_latest = v0;
+      consumption_prev   = v1;
+
+      base_latest = v0 * lrate;
+      vat_latest  = 0;
+      bill_latest_total = base_latest + vat_latest;
+
+      if (v1 !== null) {
+        base_prev = v1 * lrate;
+        vat_prev  = 0;
+        bill_prev_total = base_prev + vat_prev;
+      }
+
+      // % change based on RAW readings
+      raw_change_rate = (v1 !== null && v1 !== 0) ? ((v0 - v1) / v1) * 100 : null;
+
+    } else {
+      // Electric / Water: consumption is delta × meter_mult
+      if (rows.length < 2) {
+        return res.json({ meter_id: meterId, note: 'Not enough data for consumption.' });
+      }
+
+      const deltaLatest = v0 - v1;                       // v0, v1 exist due to rows.length >= 2
+      const deltaPrev   = v2 !== null ? (v1 - v2) : null;
+
+      consumption_latest = deltaLatest * mult;
+      consumption_prev   = (deltaPrev !== null) ? (deltaPrev * mult) : null;
+
+      // Apply minimum consumption rules
+      if (mtype === 'electric') {
+        const emin = Number(rate.emin_con) || 0;
+        if (consumption_latest <= 0) consumption_latest = emin;
+        if (consumption_prev !== null && consumption_prev <= 0) consumption_prev = emin;
+      } else if (mtype === 'water') {
+        const wmin = Number(rate.wmin_con) || 0;
+        if (consumption_latest <= 0) consumption_latest = wmin;
+        if (consumption_prev !== null && consumption_prev <= 0) consumption_prev = wmin;
+      }
+
+      // % change vs previous (based on consumption)
+      raw_change_rate = (consumption_prev !== null && consumption_prev !== 0)
+        ? ((consumption_latest - consumption_prev) / consumption_prev) * 100
+        : null;
+
+      // Billing + breakdowns
+      if (mtype === 'electric') {
+        const erate = Number(rate.erate_perKwH) || 0;
+        const eVat  = Number(rate.e_vat) || 0;
+
+        base_latest = consumption_latest * erate;
+        vat_latest  = base_latest * eVat;
+        bill_latest_total = base_latest + vat_latest;
+
+        if (consumption_prev !== null) {
+          base_prev = consumption_prev * erate;
+          vat_prev  = base_prev * eVat;
+          bill_prev_total = base_prev + vat_prev;
+        }
+      } else if (mtype === 'water') {
+        const wrate = Number(rate.wrate_perCbM) || 0;
+        const wnet  = Number(rate.wnet_vat) || 1; // divisor per your corrected formula
+        const wVat  = Number(rate.w_vat) || 0;
+
+        // base = (consumption * wrate) / wnet_vat
+        // vat   = base * w_vat
+        // total = base + vat
+        base_latest = (consumption_latest * wrate) / wnet;
+        vat_latest  = base_latest * wVat;
+        bill_latest_total = base_latest + vat_latest;
+
+        if (consumption_prev !== null) {
+          base_prev = (consumption_prev * wrate) / wnet;
+          vat_prev  = base_prev * wVat;
+          bill_prev_total = base_prev + vat_prev;
+        }
+      }
     }
-    // (No min specified for LPG — leaving as-is)
 
-    // 7) % change_rate (vs previous)
-    const raw_change_rate = (consumption_prev !== null && consumption_prev !== 0)
-      ? ((consumption_latest - consumption_prev) / consumption_prev) * 100
-      : null;
-
-    // 8) Billing
-    let bill_latest_total = null;
-    let bill_prev_total   = null;
-
-    if (mtype === 'electric') {
-      const erate = Number(rate.erate_perKwH) || 0;
-      const eVat  = Number(rate.e_vat) || 0;
-
-      const baseLatest = consumption_latest * erate;
-      const vatLatest  = baseLatest * eVat;
-      bill_latest_total = baseLatest + vatLatest;
-
-      if (consumption_prev !== null) {
-        const basePrev = consumption_prev * erate;
-        const vatPrev  = basePrev * eVat;
-        bill_prev_total = basePrev + vatPrev;
-      }
-    } else if (mtype === 'water') {
-      const wrate = Number(rate.wrate_perCbM) || 0;
-      const wnet  = Number(rate.wnet_vat) || 0;
-      const wVat  = Number(rate.w_vat) || 0;
-
-      const baseLatest = consumption_latest * wrate;
-      const netLatest  = baseLatest / wnet;
-      const vatCompLatest = netLatest * wVat;
-      bill_latest_total = baseLatest + vatCompLatest;
-
-      if (consumption_prev !== null) {
-        const basePrev = consumption_prev * wrate;
-        const netPrev  = basePrev * wnet;
-        const vatCompPrev = netPrev * wVat;
-        bill_prev_total = basePrev + vatCompPrev;
-      }
-    } else if (mtype === 'lpg') {
-      const lrate = Number(rate.lrate_perKg) || 0;
-      bill_latest_total = consumption_latest * lrate;
-      if (consumption_prev !== null) {
-        bill_prev_total = consumption_prev * lrate;
-      }
-    }
-
-    // 9) Respond (rounded)
+    // 6) Respond (rounded)
     return res.json({
       meter_id: meterId,
       meter_type: mtype,
+      // consumption & change
       consumption_latest: round(consumption_latest, 2),
       consumption_prev:   round(consumption_prev, 2),
       change_rate:        round(raw_change_rate, 1),  // percentage
+      // latest breakdown
+      base_latest:        round(base_latest, 2),
+      vat_latest:         round(vat_latest, 2),
       bill_latest_total:  round(bill_latest_total, 2),
+      // previous breakdown
+      base_prev:          round(base_prev, 2),
+      vat_prev:           round(vat_prev, 2),
       bill_prev_total:    round(bill_prev_total, 2)
     });
   } catch (err) {
@@ -240,6 +273,7 @@ router.get('/:id/computation', authorizeRole('admin', 'employee'), async (req, r
     res.status(500).json({ error: err.message });
   }
 });
+
 
 
 // CREATE NEW METER (admin only)
