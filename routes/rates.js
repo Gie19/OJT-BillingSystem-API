@@ -46,12 +46,12 @@ router.get('/:id', authorizeRole('admin'), async (req, res) => {
 
 // CREATE FULL RATE
 router.post('/', authorizeRole('admin'), async (req, res) => {
-  const { erate_perKwH, e_vat, emin_con, wmin_con, wrate_perCbM, wnet_vat, w_vat, l_rate } = req.body;
+  const { erate_perKwH, e_vat, emin_con, wmin_con, wrate_perCbM, wnet_vat, w_vat, lrate_perKg } = req.body;
 
   if (
     erate_perKwH === undefined || e_vat === undefined || emin_con === undefined ||
     wmin_con === undefined || wrate_perCbM === undefined || wnet_vat === undefined ||
-    w_vat === undefined || l_rate === undefined
+    w_vat === undefined || lrate_perKg === undefined
   ) {
     return res.status(400).json({ error: 'All fields are required' });
   }
@@ -79,7 +79,7 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
       wrate_perCbM,
       wnet_vat,
       w_vat,
-      l_rate,
+      lrate_perKg,
       last_updated: today,
       updated_by: updatedBy
     });
@@ -177,8 +177,8 @@ router.post('/water', authorizeRole('admin'), async (req, res) => {
 
 // CREATE LPG RATE
 router.post('/lpg', authorizeRole('admin'), async (req, res) => {
-  const { l_rate } = req.body;
-  if (l_rate === undefined) {
+  const { lrate_perKg } = req.body;
+  if (lrate_perKg === undefined) {
     return res.status(400).json({ error: 'LPG rate is required' });
   }
 
@@ -198,7 +198,7 @@ router.post('/lpg', authorizeRole('admin'), async (req, res) => {
 
     await Rate.create({
       rate_id: newRateId,
-      l_rate,
+      lrate_perKg,
       last_updated: today,
       updated_by: updatedBy
     });
@@ -266,7 +266,7 @@ router.put('/water/:id', authorizeRole('admin'), async (req, res) => {
 // UPDATE LPG RATE
 router.put('/lpg/:id', authorizeRole('admin'), async (req, res) => {
   const rateId = req.params.id;
-  const { l_rate } = req.body;
+  const { lrate_perKg } = req.body;
   const updatedBy = req.user.user_fullname;
   const lastUpdated = getCurrentDateTime();
 
@@ -275,7 +275,7 @@ router.put('/lpg/:id', authorizeRole('admin'), async (req, res) => {
     if (!rate) return res.status(404).json({ error: 'Rate not found' });
 
     await rate.update({
-      l_rate: l_rate ?? rate.l_rate,
+      lrate_perKg: lrate_perKg ?? rate.lrate_perKg,
       last_updated: lastUpdated,
       updated_by: updatedBy
     });
@@ -293,7 +293,7 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const {
     erate_perKwH, e_vat, emin_con,
     wmin_con, wrate_perCbM, wnet_vat, w_vat,
-    l_rate
+    lrate_perKg
   } = req.body;
   const updatedBy = req.user.user_fullname;
   const lastUpdated = getCurrentDateTime();
@@ -310,7 +310,7 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
       wrate_perCbM: wrate_perCbM ?? rate.wrate_perCbM,
       wnet_vat: wnet_vat ?? rate.wnet_vat,
       w_vat: w_vat ?? rate.w_vat,
-      l_rate: l_rate ?? rate.l_rate,
+      lrate_perKg: lrate_perKg ?? rate.lrate_perKg,
       last_updated: lastUpdated,
       updated_by: updatedBy
     });

@@ -41,7 +41,7 @@ const Rate = sequelize.define('Rate', {
     allowNull: false,
     defaultValue: 0.00
   },
-  l_rate: {
+  lrate_perKg: {
     type: DataTypes.DECIMAL(10,2),
     allowNull: false,
     defaultValue: 0.00
