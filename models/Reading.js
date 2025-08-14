@@ -6,19 +6,32 @@ const Reading = sequelize.define('Reading', {
     type: DataTypes.STRING,
     primaryKey: true
   },
-  meter_id: DataTypes.STRING,
+  meter_id: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
   reading_value: {
     type: DataTypes.DECIMAL(30, 2),
     allowNull: false,
-    defaultValue: 0.00
+    defaultValue: 0.00,
+    validate: { min: 0 } // mirrors UNSIGNED
   },
-  read_by: DataTypes.STRING,
-  lastread_date: DataTypes.DATE,
-  last_updated: {
-    type: DataTypes.DATE,
+  read_by: {
+    type: DataTypes.STRING,
     allowNull: false
   },
-  updated_by: DataTypes.STRING
+  lastread_date: {
+    type: DataTypes.DATEONLY, // DATE in SQL
+    allowNull: false
+  },
+  last_updated: {
+    type: DataTypes.DATE,     // DATETIME in SQL
+    allowNull: false
+  },
+  updated_by: {
+    type: DataTypes.STRING,
+    allowNull: false
+  }
 }, {
   tableName: 'meter_reading',
   timestamps: false,

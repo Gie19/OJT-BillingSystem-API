@@ -51,19 +51,17 @@ async function getReadingBuildingId(readingId) {
  * GET ALL METER READINGS
  * - Admins: all readings
  * - Employees: only readings for meters in stalls under their building
- * - Return 403 with clear message when nothing is accessible
  */
 router.get('/',
   authorizeRole('admin', 'employee'),
   async (req, res) => {
     try {
-      // Admin path
       if (isAdmin(req)) {
         const readings = await Reading.findAll();
         return res.json(readings);
       }
 
-      // Employee path → scope via Stall.building_id → Meter → Reading
+      // Employee-scoped
       const buildingId = req.user?.building_id;
       if (!buildingId) {
         return res.status(401).json({ error: 'Unauthorized: No building assigned' });
@@ -115,7 +113,6 @@ router.get('/',
  * GET METER READING BY ID
  * - Admins: full access
  * - Employees: only if the reading’s meter’s stall is in their building
- * - If exists but out-of-building → 403
  */
 router.get('/:id',
   authorizeRole('admin', 'employee'),
@@ -123,7 +120,6 @@ router.get('/:id',
     try {
       const readingId = req.params.id;
 
-      // 404 if the resource doesn't exist at all
       const reading = await Reading.findOne({ where: { reading_id: readingId } });
       if (!reading) return res.status(404).json({ message: 'Meter reading not found' });
 
@@ -155,11 +151,13 @@ router.get('/:id',
  * CREATE NEW METER READING
  * - Admins: unrestricted
  * - Employees: meter_id must belong to a stall under their building
+ * - lastread_date/read_by are NOT NULL → always set
+ * - lastread_date: manual input; defaults to today (YYYY-MM-DD) if omitted
  */
 router.post('/',
   authorizeRole('admin', 'employee'),
   async (req, res) => {
-    const { meter_id, reading_value } = req.body;
+    const { meter_id, reading_value, lastread_date } = req.body;
     if (!meter_id || reading_value === undefined) {
       return res.status(400).json({ error: 'meter_id and reading_value are required' });
     }
@@ -191,15 +189,15 @@ router.post('/',
       const now = getCurrentDateTime();
       const updatedBy = req.user.user_fullname;
 
-      const lastread_date = parseFloat(reading_value) !== 0.00 ? now : null;
-      const read_by = parseFloat(reading_value) !== 0.00 ? updatedBy : null;
+      const today = new Date().toISOString().slice(0, 10);
+      const finalLastReadDate = lastread_date || today;
 
       await Reading.create({
         reading_id: newReadingId,
         meter_id,
         reading_value,
-        lastread_date,
-        read_by,
+        lastread_date: finalLastReadDate,      // NOT NULL (DATEONLY)
+        read_by: updatedBy,                    // NOT NULL
         last_updated: now,
         updated_by: updatedBy
       });
@@ -216,15 +214,14 @@ router.post('/',
 /**
  * UPDATE METER READING BY ID
  * - Admins: unrestricted
- * - Employees:
- *    1) The existing reading must be under their building
- *    2) If changing meter_id, the new meter must also be under their building
+ * - Employees: can only update readings under their building
+ * - Keep lastread_date NOT NULL; allow manual updates; keep read_by NOT NULL
  */
 router.put('/:id',
   authorizeRole('admin', 'employee'),
   async (req, res) => {
     const readingId = req.params.id;
-    const { meter_id, reading_value } = req.body;
+    const { meter_id, reading_value, lastread_date } = req.body;
     const updatedBy = req.user.user_fullname;
     const now = getCurrentDateTime();
 
@@ -251,21 +248,20 @@ router.put('/:id',
         }
       }
 
-      if (!meter_id && reading_value === undefined) {
+      if (!meter_id && reading_value === undefined && lastread_date === undefined) {
         return res.status(400).json({ message: 'No changes detected in the request body.' });
       }
 
       if (meter_id) reading.meter_id = meter_id;
-      if (reading_value !== undefined) {
-        reading.reading_value = reading_value;
-        if (parseFloat(reading_value) === 0.00) {
-          reading.lastread_date = null;
-          reading.read_by = null;
-        } else {
-          reading.lastread_date = now;
-          reading.read_by = updatedBy;
-        }
+      if (reading_value !== undefined) reading.reading_value = reading_value;
+
+      // Maintain NOT NULL lastread_date; allow manual edit; if omitted, keep current value
+      if (lastread_date !== undefined) {
+        reading.lastread_date = lastread_date || new Date().toISOString().slice(0, 10);
       }
+
+      // Always stamp who performed the edit to satisfy NOT NULL read_by
+      reading.read_by = updatedBy;
 
       reading.last_updated = now;
       reading.updated_by = updatedBy;
@@ -293,13 +289,11 @@ router.delete('/:id',
       return res.status(400).json({ error: 'Reading ID is required' });
     }
     try {
-      // 404 if not found
       const reading = await Reading.findOne({ where: { reading_id: readingId } });
       if (!reading) {
         return res.status(404).json({ error: 'Reading not found' });
       }
 
-      // Employee scope check
       if (!isAdmin(req)) {
         const userBldg = req.user?.building_id;
         if (!userBldg) {
