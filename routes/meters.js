@@ -253,21 +253,24 @@ router.get('/:id/computation', authorizeRole('admin', 'employee'), async (req, r
 
     // 6) Respond (rounded)
     return res.json({
-      meter_id: meterId,
-      meter_type: mtype,
-      // consumption & change
-      consumption_latest: round(consumption_latest, 2),
-      consumption_prev:   round(consumption_prev, 2),
-      change_rate:        round(raw_change_rate, 1),  // percentage
-      // latest breakdown
-      base_latest:        round(base_latest, 2),
-      vat_latest:         round(vat_latest, 2),
-      bill_latest_total:  round(bill_latest_total, 2),
-      // previous breakdown
-      base_prev:          round(base_prev, 2),
-      vat_prev:           round(vat_prev, 2),
-      bill_prev_total:    round(bill_prev_total, 2)
-    });
+  meter_id: meterId,
+  meter_type: mtype,
+  // direct reading values
+  latest_reading_value: round(v0, 2),
+  prev_reading_value:   round(v1, 2),
+  // consumption & change
+  consumption_latest: round(consumption_latest, 2),
+  consumption_prev:   round(consumption_prev, 2),
+  change_rate:        round(raw_change_rate, 1),
+  // latest breakdown
+  base_latest:        round(base_latest, 2),
+  vat_latest:         round(vat_latest, 2),
+  bill_latest_total:  round(bill_latest_total, 2),
+  // previous breakdown
+  base_prev:          round(base_prev, 2),
+  vat_prev:           round(vat_prev, 2),
+  bill_prev_total:    round(bill_prev_total, 2)
+});
   } catch (err) {
     console.error('Computation error:', err);
     res.status(500).json({ error: err.message });
