@@ -14,6 +14,7 @@ const { Op, literal } = require('sequelize');
 
 const Tenant = require('../models/Tenant');
 const Stall = require('../models/Stall');
+const Rate = require('../models/Rate'); // for delete guard
 
 // All routes below require valid token
 router.use(authenticateToken);
@@ -22,23 +23,15 @@ router.use(authenticateToken);
  * GET ALL TENANTS
  * - Admins: return all tenants
  * - Operators: only tenants in their assigned building_id
- * - If none visible for operator, return 403 with message
  */
 router.get('/',
   authorizeRole('admin','operator'),
   attachBuildingScope(),
   async (req, res) => {
     try {
-      const where = req.buildingWhere ? req.buildingWhere() : {};
-      const tenants = await Tenant.findAll({ where });
-
-      if (!tenants.length && req.restrictToBuildingId) {
-        return res.status(403).json({
-          error: 'No access: There are no tenants under your assigned building.'
-        });
-      }
-
-      res.json(tenants);
+      const tenants = await Tenant.findAll({ where: req.buildingWhere() });
+      // Return 200 with [] if none
+      return res.json(tenants);
     } catch (err) {
       console.error('Database error:', err);
       res.status(500).json({ error: err.message });
@@ -90,7 +83,8 @@ router.post('/',
         tenant_name,
         bill_start
       } = req.body;
-      // Compute building_id: operators may omit and we default to their building
+
+      // Operators may omit building_id; default to their own
       const building_id = req.body.building_id || (!isAdmin ? req.user.building_id : undefined);
 
       if (!tenant_sn || !tenant_name || !building_id || !bill_start) {
@@ -200,7 +194,7 @@ router.put('/:id',
  * DELETE TENANT BY ID
  * - Admins: unrestricted
  * - Operators: only if tenant is in their building
- * - Blocks delete if there are referencing stalls
+ * - Blocks delete if there are referencing stalls or a rate row
  */
 router.delete('/:id',
   authorizeRole('admin','operator'),
@@ -218,10 +212,14 @@ router.delete('/:id',
       return res.status(400).json({ error: 'Tenant ID is required' });
     }
     try {
-      const stalls = await Stall.findAll({ where: { tenant_id: tenantId }, attributes: ['stall_id'] });
+      const [stalls, rate] = await Promise.all([
+        Stall.findAll({ where: { tenant_id: tenantId }, attributes: ['stall_id'] }),
+        Rate.findOne({ where: { tenant_id: tenantId }, attributes: ['rate_id'] }),
+      ]);
 
       const errors = [];
       if (stalls.length) errors.push(`Stall(s): [${stalls.map(s => s.stall_id).join(', ')}]`);
+      if (rate) errors.push(`Rate: [${rate.rate_id}]`);
 
       if (errors.length) {
         return res.status(400).json({

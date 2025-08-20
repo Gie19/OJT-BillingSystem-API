@@ -4,17 +4,34 @@ const sequelize = require('./index');
 const Stall = sequelize.define('Stall', {
   stall_id: {
     type: DataTypes.STRING,
-    primaryKey: true
+    primaryKey: true,
   },
   stall_sn: {
-    type: DataTypes.STRING,
-    unique: true
+    type: DataTypes.STRING(30),
+    allowNull: false,
+    unique: true,
   },
-  tenant_id: DataTypes.STRING, // foreign key (can be NULL)
-  building_id: DataTypes.STRING, // foreign key
-  stall_status: DataTypes.ENUM('occupied', 'available', 'under maintenance'),
-  last_updated: DataTypes.DATE,    // <-- 'datetime' in SQL, use DATE
-  updated_by: DataTypes.STRING
+  tenant_id: {
+    type: DataTypes.STRING(30), // nullable FK
+    allowNull: true,
+  },
+  building_id: {
+    type: DataTypes.STRING(30), // required FK
+    allowNull: false,
+  },
+  stall_status: {
+    type: DataTypes.ENUM('occupied', 'available', 'under maintenance'),
+    allowNull: false,
+    defaultValue: 'available',
+  },
+  last_updated: {
+    type: DataTypes.DATE, // DATETIME in SQL
+    allowNull: false,
+  },
+  updated_by: {
+    type: DataTypes.STRING(30),
+    allowNull: false,
+  },
 }, {
   tableName: 'stall_list',
   timestamps: false,
