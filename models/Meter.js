@@ -6,20 +6,36 @@ const Meter = sequelize.define('Meter', {
     type: DataTypes.STRING,
     primaryKey: true
   },
-  meter_type: DataTypes.ENUM('electric', 'water', 'lpg'),
-  meter_sn: DataTypes.STRING,
-  meter_mult: {
-    type: DataTypes.DECIMAL(10, 2),
+  meter_type: {
+    type: DataTypes.ENUM('electric', 'water', 'lpg'),
     allowNull: false
   },
-  stall_id: DataTypes.STRING,      // Foreign key (not null)
-  meter_status: DataTypes.ENUM('active', 'inactive'),
-  // qr_id: DataTypes.STRING,     // REMOVED
+  meter_sn: {
+    type: DataTypes.STRING(30),
+    allowNull: false,
+    unique: true
+  },
+  meter_mult: {
+    type: DataTypes.DECIMAL(10, 2).UNSIGNED,
+    allowNull: false
+  },
+  meter_status: {
+    type: DataTypes.ENUM('active', 'inactive'),
+    allowNull: false,
+    defaultValue: 'inactive'
+  },
+  stall_id: {
+    type: DataTypes.STRING(30),
+    allowNull: false
+  },
   last_updated: {
     type: DataTypes.DATE,
     allowNull: false
   },
-  updated_by: DataTypes.STRING
+  updated_by: {
+    type: DataTypes.STRING(30),
+    allowNull: false
+  }
 }, {
   tableName: 'meter_list',
   timestamps: false,

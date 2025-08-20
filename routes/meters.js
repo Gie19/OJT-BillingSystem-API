@@ -1,63 +1,51 @@
-// routes/meters.js
 const express = require('express');
 const router = express.Router();
 
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
-const { authorizeBuildingParam, attachBuildingScope, enforceRecordBuilding } = require('../middleware/authorizeBuilding');
+const {
+  authorizeBuildingParam,
+  attachBuildingScope,
+  enforceRecordBuilding
+} = require('../middleware/authorizeBuilding');
 
 const { Op, literal } = require('sequelize');
 
-// Imported models
 const Meter = require('../models/Meter');
 const Stall = require('../models/Stall');
 const Reading = require('../models/Reading');
-const Building = require('../models/Building');
-const Rate = require('../models/Rate');
 
-// All routes below require valid token
+// All routes require a valid token
 router.use(authenticateToken);
 
 /**
- * GET ALL METERS
- * - Admins: return all meters
- * - Employees: only meters in their assigned building (via Stall.building_id)
+ * GET /meters
+ * - admin: all
+ * - operator: only meters in their building (via Stall.building_id)
  */
 router.get('/',
-  authorizeRole('admin', 'employee'),
+  authorizeRole('admin', 'operator'),
   attachBuildingScope(),
   async (req, res) => {
     try {
+      // If admin, no building filter
       if (!req.restrictToBuildingId) {
         const meters = await Meter.findAll();
         return res.json(meters);
       }
 
+      // For operators, restrict via stall->building
       const stallRows = await Stall.findAll({
         where: { building_id: req.restrictToBuildingId },
         attributes: ['stall_id'],
         raw: true
       });
-
       const stallIds = stallRows.map(s => s.stall_id);
-      if (stallIds.length === 0) {
-        return res.status(403).json({
-          error: 'No access: There are no meters under your assigned building.'
-        });
-      }
+      if (stallIds.length === 0) return res.json([]);
 
-      const meters = await Meter.findAll({
-        where: { stall_id: stallIds }
-      });
-
-      if (meters.length === 0) {
-        return res.status(403).json({
-          error: 'No access: All meters found belong to another building.'
-        });
-      }
-
-      res.json(meters);
+      const meters = await Meter.findAll({ where: { stall_id: stallIds } });
+      return res.json(meters);
     } catch (err) {
       console.error('Database error:', err);
       res.status(500).json({ error: err.message });
@@ -65,18 +53,17 @@ router.get('/',
   }
 );
 
-
 /**
- * GET METER BY ID
- * - Admins: full access
- * - Employees: only if the meter’s stall is in their building
+ * GET /meters/:id
+ * - admin: full access
+ * - operator: only if the meter’s stall belongs to their building
  */
 router.get('/:id',
-  authorizeRole('admin', 'employee'),
+  authorizeRole('admin', 'operator'),
   enforceRecordBuilding(async (req) => {
     const meter = await Meter.findOne({
       where: { meter_id: req.params.id },
-      attributes: ['meter_id', 'stall_id'],
+      attributes: ['stall_id'],
       raw: true
     });
     if (!meter) return null;
@@ -100,189 +87,14 @@ router.get('/:id',
   }
 );
 
-// GET latest consumption, % change, base/vat breakdown, and totals (electric, water, LPG)
-router.get('/:id/computation', authorizeRole('admin', 'employee'), async (req, res) => {
-  try {
-    const meterId = req.params.id;
-
-    // helpers
-    const round = (num, dec) => (num === null || num === undefined) ? null : Number(Number(num).toFixed(dec));
-    const isAdmin = (req.user?.user_level || '').toLowerCase() === 'admin';
-
-    // 1) Load meter
-    const meter = await Meter.findOne({ where: { meter_id: meterId }, raw: true });
-    if (!meter) return res.status(404).json({ error: 'Meter not found' });
-
-    // 2) Building scope for employees (meter -> stall -> building)
-    const stall = await Stall.findOne({
-      where: { stall_id: meter.stall_id },
-      attributes: ['building_id'],
-      raw: true
-    });
-    if (!stall) return res.status(400).json({ error: 'Stall not found for meter' });
-
-    if (!isAdmin) {
-      const userBldg = req.user?.building_id;
-      if (!userBldg) return res.status(401).json({ error: 'Unauthorized: No building assigned' });
-      if (stall.building_id !== userBldg) {
-        return res.status(403).json({ error: 'No access: This meter is not under your assigned building.' });
-      }
-    }
-
-    // 3) Fetch last up-to-3 readings (latest first)
-    const rows = await Reading.findAll({
-      where: { meter_id: meterId },
-      order: [['lastread_date', 'DESC'], ['reading_id', 'DESC']],
-      limit: 3,
-      raw: true
-    });
-
-    if (rows.length < 1) {
-      return res.json({ meter_id: meterId, note: 'No readings found.' });
-    }
-
-    // 4) Get building's utility rates
-    const building = await Building.findOne({
-      where: { building_id: stall.building_id },
-      attributes: ['rate_id'],
-      raw: true
-    });
-    if (!building?.rate_id) return res.status(400).json({ error: 'No rate_id configured for building' });
-
-    const rate = await Rate.findOne({ where: { rate_id: building.rate_id }, raw: true });
-    if (!rate) return res.status(400).json({ error: 'Utility rate not found for building' });
-
-    // 5) Prepare values
-    const mtype = (meter.meter_type || '').toLowerCase();
-    const mult = Number(meter.meter_mult) || 1.0;
-
-    const v0 = Number(rows[0].reading_value) || 0;                  // latest reading_value
-    const v1 = rows[1] ? (Number(rows[1].reading_value) || 0) : null; // previous reading_value
-    const v2 = rows[2] ? (Number(rows[2].reading_value) || 0) : null; // third reading_value (optional)
-
-    let consumption_latest = null;
-    let consumption_prev   = null;
-    let raw_change_rate    = null;
-
-    // breakdowns
-    let base_latest = null, vat_latest = null, bill_latest_total = null;
-    let base_prev   = null, vat_prev   = null, bill_prev_total   = null;
-
-    if (mtype === 'lpg') {
-      // LPG: Billing uses RAW reading_value × lrate_perKg (no deltas)
-      const lrate = Number(rate.lrate_perKg ?? rate.l_rate) || 0; // support either column name
-
-      // For visibility, expose "consumption" as the raw reading_value
-      consumption_latest = v0;
-      consumption_prev   = v1;
-
-      base_latest = v0 * lrate;
-      vat_latest  = 0;
-      bill_latest_total = base_latest + vat_latest;
-
-      if (v1 !== null) {
-        base_prev = v1 * lrate;
-        vat_prev  = 0;
-        bill_prev_total = base_prev + vat_prev;
-      }
-
-      // % change based on RAW readings
-      raw_change_rate = (v1 !== null && v1 !== 0) ? ((v0 - v1) / v1) * 100 : null;
-
-    } else {
-      // Electric / Water: consumption is delta × meter_mult
-      if (rows.length < 2) {
-        return res.json({ meter_id: meterId, note: 'Not enough data for consumption.' });
-      }
-
-      const deltaLatest = v0 - v1;                       // v0, v1 exist due to rows.length >= 2
-      const deltaPrev   = v2 !== null ? (v1 - v2) : null;
-
-      consumption_latest = deltaLatest * mult;
-      consumption_prev   = (deltaPrev !== null) ? (deltaPrev * mult) : null;
-
-      // Apply minimum consumption rules
-      if (mtype === 'electric') {
-        const emin = Number(rate.emin_con) || 0;
-        if (consumption_latest <= 0) consumption_latest = emin;
-        if (consumption_prev !== null && consumption_prev <= 0) consumption_prev = emin;
-      } else if (mtype === 'water') {
-        const wmin = Number(rate.wmin_con) || 0;
-        if (consumption_latest <= 0) consumption_latest = wmin;
-        if (consumption_prev !== null && consumption_prev <= 0) consumption_prev = wmin;
-      }
-
-      // % change vs previous (based on consumption)
-      raw_change_rate = (consumption_prev !== null && consumption_prev !== 0)
-        ? ((consumption_latest - consumption_prev) / consumption_prev) * 100
-        : null;
-
-      // Billing + breakdowns
-      if (mtype === 'electric') {
-        const erate = Number(rate.erate_perKwH) || 0;
-        const eVat  = Number(rate.e_vat) || 0;
-
-        base_latest = consumption_latest * erate;
-        vat_latest  = base_latest * eVat;
-        bill_latest_total = base_latest + vat_latest;
-
-        if (consumption_prev !== null) {
-          base_prev = consumption_prev * erate;
-          vat_prev  = base_prev * eVat;
-          bill_prev_total = base_prev + vat_prev;
-        }
-      } else if (mtype === 'water') {
-        const wrate = Number(rate.wrate_perCbM) || 0;
-        const wnet  = Number(rate.wnet_vat) || 1; // divisor per your corrected formula
-        const wVat  = Number(rate.w_vat) || 0;
-
-        // base = (consumption * wrate) / wnet_vat
-        // vat   = base * w_vat
-        // total = base + vat
-        base_latest = (consumption_latest * wrate) / wnet;
-        vat_latest  = base_latest * wVat;
-        bill_latest_total = base_latest + vat_latest;
-
-        if (consumption_prev !== null) {
-          base_prev = (consumption_prev * wrate) / wnet;
-          vat_prev  = base_prev * wVat;
-          bill_prev_total = base_prev + vat_prev;
-        }
-      }
-    }
-
-    // 6) Respond (rounded)
-    return res.json({
-  meter_id: meterId,
-  meter_type: mtype,
-  // direct reading values
-  latest_reading_value: round(v0, 2),
-  prev_reading_value:   round(v1, 2),
-  // consumption & change
-  consumption_latest: round(consumption_latest, 2),
-  consumption_prev:   round(consumption_prev, 2),
-  change_rate:        round(raw_change_rate, 1),
-  // latest breakdown
-  base_latest:        round(base_latest, 2),
-  vat_latest:         round(vat_latest, 2),
-  bill_latest_total:  round(bill_latest_total, 2),
-  // previous breakdown
-  base_prev:          round(base_prev, 2),
-  vat_prev:           round(vat_prev, 2),
-  bill_prev_total:    round(bill_prev_total, 2)
-});
-  } catch (err) {
-    console.error('Computation error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
-
-// CREATE NEW METER (admin only)
+/**
+ * POST /meters
+ * - admin: any building
+ * - operator: only inside their building (checks stall.building_id)
+ */
 router.post('/',
-  authorizeRole('admin'),
-  authorizeBuildingParam(), // optional: if client provides building_id, ensure it matches (admins bypass anyway)
+  authorizeRole('admin', 'operator'),
+  authorizeBuildingParam(), // if body.building_id is sent, ensures it matches operator’s building (admin bypass)
   async (req, res) => {
     const { meter_type, meter_sn, meter_mult, stall_id, meter_status } = req.body;
 
@@ -291,33 +103,36 @@ router.post('/',
     }
 
     try {
-      // Check if stall_id exists
-      const stall = await Stall.findOne({ where: { stall_id } });
-      if (!stall) {
-        return res.status(400).json({ error: 'Invalid stall_id: Stall does not exist.' });
+      // unique meter_sn
+      const dup = await Meter.findOne({ where: { meter_sn } });
+      if (dup) return res.status(409).json({ error: 'meter_sn already exists' });
+
+      // stall must exist (and be in user’s building if operator)
+      const stall = await Stall.findOne({ where: { stall_id }, attributes: ['building_id'], raw: true });
+      if (!stall) return res.status(400).json({ error: 'Invalid stall_id: Stall does not exist.' });
+
+      const isAdmin = (req.user?.user_level || '').toLowerCase() === 'admin';
+      if (!isAdmin && stall.building_id !== req.user.building_id) {
+        return res.status(403).json({ error: 'No access: Stall not under your assigned building.' });
       }
 
-      // Get next meter_id
+      // Generate new meter_id (MTR-<n>)
       const lastMeter = await Meter.findOne({
         where: { meter_id: { [Op.like]: 'MTR-%' } },
         order: [[literal("CAST(SUBSTRING(meter_id, 5) AS UNSIGNED)"), "DESC"]],
       });
-
       let nextNumber = 1;
       if (lastMeter) {
-        const lastNumber = parseInt(lastMeter.meter_id.slice(4), 10);
-        if (!isNaN(lastNumber)) nextNumber = lastNumber + 1;
+        const num = parseInt(lastMeter.meter_id.slice(4), 10);
+        if (!isNaN(num)) nextNumber = num + 1;
       }
       const newMeterId = `MTR-${nextNumber}`;
 
-      // Determine default meter_mult if not provided
+      // Default multiplier if not provided
       let finalMult = meter_mult;
       if (finalMult === undefined || finalMult === null || finalMult === '') {
-        finalMult = (meter_type.toLowerCase() === 'water') ? 93.00 : 1;
+        finalMult = (String(meter_type).toLowerCase() === 'water') ? 93.00 : 1;
       }
-
-      const today = getCurrentDateTime();
-      const updatedBy = req.user.user_fullname;
 
       await Meter.create({
         meter_id: newMeterId,
@@ -326,8 +141,8 @@ router.post('/',
         meter_mult: finalMult,
         stall_id,
         meter_status,
-        last_updated: today,
-        updated_by: updatedBy
+        last_updated: getCurrentDateTime(),
+        updated_by: req.user.user_fullname
       });
 
       res.status(201).json({ message: 'Meter created successfully', meterId: newMeterId });
@@ -338,44 +153,66 @@ router.post('/',
   }
 );
 
-// UPDATE METER BY ID (admin only)
+/**
+ * PUT /meters/:id
+ * - admin: unrestricted
+ * - operator: only if meter is under their building; if moving to a new stall, that stall must also be under their building
+ */
 router.put('/:id',
-  authorizeRole('admin'),
-  authorizeBuildingParam(), // optional: if a building_id is passed, keep consistent semantics
+  authorizeRole('admin', 'operator'),
   async (req, res) => {
     const meterId = req.params.id;
     const { meter_type, meter_sn, stall_id, meter_status, meter_mult } = req.body;
-    const updatedBy = req.user.user_fullname;
-    const lastUpdated = getCurrentDateTime();
 
     try {
       const meter = await Meter.findOne({ where: { meter_id: meterId } });
-      if (!meter) {
-        return res.status(404).json({ error: 'Meter not found' });
-      }
+      if (!meter) return res.status(404).json({ error: 'Meter not found' });
 
-      // Validate stall_id if changed
-      if (stall_id && stall_id !== meter.stall_id) {
-        const stall = await Stall.findOne({ where: { stall_id } });
-        if (!stall) {
-          return res.status(400).json({ error: 'Invalid stall_id: Stall does not exist.' });
+      const isAdmin = (req.user?.user_level || '').toLowerCase() === 'admin';
+
+      // operator building scope on existing meter
+      if (!isAdmin) {
+        const currStall = await Stall.findOne({
+          where: { stall_id: meter.stall_id },
+          attributes: ['building_id'],
+          raw: true
+        });
+        if (!currStall || currStall.building_id !== req.user.building_id) {
+          return res.status(403).json({ error: 'No access: Meter not under your assigned building.' });
         }
       }
 
-      // Determine final values
-      let finalMult = meter_mult !== undefined ? meter_mult : meter.meter_mult;
+      // if changing stall, validate target stall + scope
+      if (stall_id && stall_id !== meter.stall_id) {
+        const target = await Stall.findOne({ where: { stall_id }, attributes: ['building_id'], raw: true });
+        if (!target) return res.status(400).json({ error: 'Invalid stall_id: Stall does not exist.' });
+        if (!isAdmin && target.building_id !== req.user.building_id) {
+          return res.status(403).json({ error: 'No access: Target stall not under your building.' });
+        }
+      }
+
+      // unique meter_sn if changed
+      if (meter_sn && meter_sn !== meter.meter_sn) {
+        const exists = await Meter.findOne({
+          where: { meter_sn, meter_id: { [Op.ne]: meterId } }
+        });
+        if (exists) return res.status(409).json({ error: 'meter_sn already exists' });
+      }
+
+      // derive final multiplier
+      let finalMult = (meter_mult !== undefined) ? meter_mult : meter.meter_mult;
       if (meter_type && meter_type !== meter.meter_type && meter_mult === undefined) {
-        finalMult = (meter_type.toLowerCase() === 'water') ? 93.00 : 1;
+        finalMult = (String(meter_type).toLowerCase() === 'water') ? 93.00 : 1;
       }
 
       await meter.update({
-        meter_type: meter_type || meter.meter_type,
-        meter_sn: meter_sn || meter.meter_sn,
-        stall_id: stall_id || meter.stall_id,
-        meter_status: meter_status || meter.meter_status,
+        meter_type: meter_type ?? meter.meter_type,
+        meter_sn: meter_sn ?? meter.meter_sn,
+        stall_id: stall_id ?? meter.stall_id,
+        meter_status: meter_status ?? meter.meter_status,
         meter_mult: finalMult,
-        last_updated: lastUpdated,
-        updated_by: updatedBy
+        last_updated: getCurrentDateTime(),
+        updated_by: req.user.user_fullname
       });
 
       res.json({ message: `Meter with ID ${meterId} updated successfully` });
@@ -386,30 +223,41 @@ router.put('/:id',
   }
 );
 
-// DELETE METER BY ID (admin only) with dependency check
+/**
+ * DELETE /meters/:id
+ * - admin: unrestricted
+ * - operator: only if meter is under their building
+ * - blocks delete if readings exist
+ */
 router.delete('/:id',
-  authorizeRole('admin'),
+  authorizeRole('admin', 'operator'),
   async (req, res) => {
     const meterId = req.params.id;
-    if (!meterId) {
-      return res.status(400).json({ error: 'Meter ID is required' });
-    }
+    if (!meterId) return res.status(400).json({ error: 'Meter ID is required' });
+
     try {
+      // operator scope check
+      const isAdmin = (req.user?.user_level || '').toLowerCase() === 'admin';
+      if (!isAdmin) {
+        const meter = await Meter.findOne({ where: { meter_id: meterId }, attributes: ['stall_id'], raw: true });
+        if (!meter) return res.status(404).json({ error: 'Meter not found' });
+        const stall = await Stall.findOne({ where: { stall_id: meter.stall_id }, attributes: ['building_id'], raw: true });
+        if (!stall || stall.building_id !== req.user.building_id) {
+          return res.status(403).json({ error: 'No access: Meter not under your assigned building.' });
+        }
+      }
+
+      // dependency check: readings
       const readings = await Reading.findAll({ where: { meter_id: meterId }, attributes: ['reading_id'] });
-
-      let errors = [];
-      if (readings.length) errors.push(`Reading(s): [${readings.map(r => r.reading_id).join(', ')}]`);
-
-      if (errors.length) {
+      if (readings.length) {
         return res.status(400).json({
-          error: `Cannot delete meter. It is still referenced by: ${errors.join('; ')}`
+          error: `Cannot delete meter. It is still referenced by: Reading(s) [${readings.map(r => r.reading_id).join(', ')}]`
         });
       }
 
       const deleted = await Meter.destroy({ where: { meter_id: meterId } });
-      if (deleted === 0) {
-        return res.status(404).json({ error: 'Meter not found' });
-      }
+      if (deleted === 0) return res.status(404).json({ error: 'Meter not found' });
+
       res.json({ message: `Meter with ID ${meterId} deleted successfully` });
     } catch (err) {
       console.error('Error in DELETE /meters/:id:', err);
