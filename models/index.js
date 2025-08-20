@@ -1,3 +1,4 @@
+// models/index.js (or wherever you init Sequelize)
 require('dotenv').config();
 const { Sequelize } = require('sequelize');
 
@@ -9,7 +10,20 @@ const sequelize = new Sequelize(
     host: process.env.DB_HOST,
     port: process.env.DB_PORT,
     dialect: 'mysql',
-    logging: true // Set to true if you want SQL logs in console
+    logging: true,            // set false to quiet SQL logs
+
+    // >>> Timezone & date handling <<<
+    timezone: '+08:00',       // write dates as Asia/Manila
+    dialectOptions: {
+      dateStrings: true,      // return DATE/DATETIME as strings
+      typeCast: (field, next) => {
+        // keep DATETIME/TIMESTAMP as raw strings (no TZ conversion on read)
+        if (field.type === 'DATETIME' || field.type === 'TIMESTAMP') {
+          return field.string();
+        }
+        return next();
+      },
+    },
   }
 );
 
