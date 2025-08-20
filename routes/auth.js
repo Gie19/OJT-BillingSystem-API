@@ -3,7 +3,7 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
-const User = require('../models/User'); 
+const User = require('../models/User');
 const { comparePassword } = require('../utils/hashPassword');
 
 // POST /auth/login
@@ -15,29 +15,21 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    // Use Sequelize to look up user in the database
     const user = await User.findOne({ where: { user_id } });
+    if (!user) return res.status(401).json({ error: 'No existing credentials' });
 
-    if (!user) {
-      return res.status(401).json({ error: 'No existing credentials' });
-    }
-
-    // Compare password using utility function
     const match = await comparePassword(user_password, user.user_password);
+    if (!match) return res.status(401).json({ error: 'Invalid credentials' });
 
-    if (!match) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    // Create JWT payload
+    // Add utility_role to the token; building_id can be null for admins
     const payload = {
       user_id: user.user_id,
-      user_level: user.user_level,
+      user_level: user.user_level,       // 'admin'|'operator'|'biller'|'reader'
       user_fullname: user.user_fullname,
-      building_id: user.building_id
+      building_id: user.building_id || null,
+      utility_role: user.utility_role || null
     };
 
-    // Sign JWT
     const token = jwt.sign(payload, process.env.JWT_SECRET, {
       expiresIn: process.env.JWT_EXPIRES_IN || '1h'
     });

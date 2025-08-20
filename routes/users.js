@@ -1,21 +1,24 @@
 const express = require('express');
 const router = express.Router();
 
-//Import utilities and middleware
+// Utilities & middleware
 const { hashPassword } = require('../utils/hashPassword');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
 
-//Import for sequelize operations
+// Sequelize
 const { Op, literal } = require('sequelize');
 
-//Imported models
+// Model
 const User = require('../models/User');
+
+const ALLOWED_ROLES = new Set(['admin', 'operator', 'biller', 'reader']);
+const ALLOWED_UTILS = new Set(['electric', 'water', 'lpg']);
 
 // All routes below require a valid token
 router.use(authenticateToken);
 
-// GET ALL USERS
+// GET ALL USERS (admin only)
 router.get('/', authorizeRole('admin'), async (req, res) => {
   try {
     const users = await User.findAll();
@@ -26,13 +29,11 @@ router.get('/', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// GET USER BY ID
+// GET USER BY ID (admin only)
 router.get('/:id', authorizeRole('admin'), async (req, res) => {
   try {
     const user = await User.findOne({ where: { user_id: req.params.id } });
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
+    if (!user) return res.status(404).json({ message: 'User not found' });
     res.json(user);
   } catch (err) {
     console.error('Database error:', err);
@@ -40,12 +41,44 @@ router.get('/:id', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// CREATE NEW USER WITH 'USER-' PREFIXED ID
+// CREATE NEW USER WITH 'USER-' PREFIXED ID (admin only)
 router.post('/', authorizeRole('admin'), async (req, res) => {
-  const { user_password, user_fullname, user_level, building_id } = req.body;
+  const {
+    user_password,
+    user_fullname,
+    user_level,
+    building_id,       // optional for admin
+    utility_role       // optional array of strings
+  } = req.body;
 
-  if (!user_password || !user_fullname || !user_level || !building_id) {
-    return res.status(400).json({ error: 'All fields are required' });
+  // Basic presence checks
+  if (!user_password || !user_fullname || !user_level) {
+    return res.status(400).json({ error: 'user_password, user_fullname, and user_level are required' });
+  }
+
+  // Role validation
+  if (!ALLOWED_ROLES.has(String(user_level).toLowerCase())) {
+    return res.status(400).json({ error: 'Invalid user_level' });
+  }
+
+  // building_id required for non-admins
+  const role = String(user_level).toLowerCase();
+  if (role !== 'admin' && !building_id) {
+    return res.status(400).json({ error: 'building_id is required for non-admin users' });
+  }
+
+  // utility_role validation: must be array of allowed values if provided
+  let utilPayload = null;
+  if (utility_role != null) {
+    if (!Array.isArray(utility_role)) {
+      return res.status(400).json({ error: 'utility_role must be an array of strings' });
+    }
+    const clean = utility_role.map(x => String(x).toLowerCase());
+    if (!clean.every(v => ALLOWED_UTILS.has(v))) {
+      return res.status(400).json({ error: 'utility_role contains invalid utility. Allowed: electric, water, lpg' });
+    }
+    // Only biller/reader meaningfully use utility_role; for others we’ll still store it if provided
+    utilPayload = clean;
   }
 
   try {
@@ -70,8 +103,9 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
       user_id: newUserId,
       user_password: hashedPassword,
       user_fullname,
-      user_level,
-      building_id
+      user_level: role,                // store normalized
+      building_id: building_id || null,
+      utility_role: utilPayload
     });
 
     res.status(201).json({
@@ -84,19 +118,14 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// DELETE USER BY ID
+// DELETE USER BY ID (admin only)
 router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   const userId = req.params.id;
-
-  if (!userId) {
-    return res.status(400).json({ error: 'User ID is required' });
-  }
+  if (!userId) return res.status(400).json({ error: 'User ID is required' });
 
   try {
     const deletedRows = await User.destroy({ where: { user_id: userId } });
-    if (deletedRows === 0) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    if (deletedRows === 0) return res.status(404).json({ error: 'User not found' });
     res.json({ message: `User with ID ${userId} deleted successfully` });
   } catch (err) {
     console.error('Error in DELETE /users/:id:', err);
@@ -104,29 +133,66 @@ router.delete('/:id', authorizeRole('admin'), async (req, res) => {
   }
 });
 
-// UPDATE USER BY ID 
+// UPDATE USER BY ID (admin only)
 router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const userId = req.params.id;
-  const { user_password, user_fullname, user_level, building_id } = req.body;
+  const {
+    user_password,
+    user_fullname,
+    user_level,
+    building_id,
+    utility_role
+  } = req.body;
 
   try {
     const user = await User.findOne({ where: { user_id: userId } });
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const updatedFields = {};
+
+    if (user_fullname != null) updatedFields.user_fullname = user_fullname;
+
+    if (user_level != null) {
+      const lvl = String(user_level).toLowerCase();
+      if (!ALLOWED_ROLES.has(lvl)) {
+        return res.status(400).json({ error: 'Invalid user_level' });
+      }
+      updatedFields.user_level = lvl;
+
+      // If switching to admin, allow building_id to go null
+      if (lvl === 'admin' && building_id === undefined) {
+        // leave building_id as-is unless explicitly provided
+      }
     }
 
-    const updatedFields = {
-      user_fullname: user_fullname || user.user_fullname,
-      user_level: user_level || user.user_level,
-      building_id: building_id || user.building_id,
-    };
+    if (building_id !== undefined) {
+      // require building for non-admins
+      const effectiveLevel = (updatedFields.user_level || user.user_level || '').toLowerCase();
+      if (effectiveLevel !== 'admin' && !building_id) {
+        return res.status(400).json({ error: 'building_id is required for non-admin users' });
+      }
+      updatedFields.building_id = building_id || null;
+    }
+
+    if (utility_role !== undefined) {
+      if (utility_role === null) {
+        updatedFields.utility_role = null;
+      } else if (Array.isArray(utility_role)) {
+        const clean = utility_role.map(x => String(x).toLowerCase());
+        if (!clean.every(v => ALLOWED_UTILS.has(v))) {
+          return res.status(400).json({ error: 'utility_role contains invalid utility. Allowed: electric, water, lpg' });
+        }
+        updatedFields.utility_role = clean;
+      } else {
+        return res.status(400).json({ error: 'utility_role must be an array or null' });
+      }
+    }
 
     if (user_password) {
       updatedFields.user_password = await hashPassword(user_password);
     }
 
     await user.update(updatedFields);
-
     res.json({ message: `User with ID ${userId} updated successfully` });
   } catch (err) {
     console.error('Error in PUT /users/:id:', err);
