@@ -5,6 +5,7 @@ const router = express.Router();
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
+const authorizeUtilityRole = require('../middleware/authorizeUtilityRole'); // ⬅️ NEW
 
 const { Op, literal } = require('sequelize');
 
@@ -50,10 +51,11 @@ async function getReadingBuildingId(readingId) {
 /**
  * GET ALL METER READINGS
  * - Admins: all readings
- * - Employees: only readings for meters in stalls under their building
+ * - Operators: readings for meters in stalls under their building
+ * - Returns [] if none
  */
 router.get('/',
-  authorizeRole('admin', 'employee'),
+  authorizeRole('admin', 'operator'),
   async (req, res) => {
     try {
       if (isAdmin(req)) {
@@ -61,7 +63,7 @@ router.get('/',
         return res.json(readings);
       }
 
-      // Employee-scoped
+      // Operator-scoped
       const buildingId = req.user?.building_id;
       if (!buildingId) {
         return res.status(401).json({ error: 'Unauthorized: No building assigned' });
@@ -73,11 +75,7 @@ router.get('/',
         raw: true
       });
       const stallIds = stalls.map(s => s.stall_id);
-      if (stallIds.length === 0) {
-        return res.status(403).json({
-          error: 'No access: There are no stalls under your assigned building.'
-        });
-      }
+      if (stallIds.length === 0) return res.json([]);
 
       const meters = await Meter.findAll({
         where: { stall_id: stallIds },
@@ -85,23 +83,13 @@ router.get('/',
         raw: true
       });
       const meterIds = meters.map(m => m.meter_id);
-      if (meterIds.length === 0) {
-        return res.status(403).json({
-          error: 'No access: There are no meters under your assigned building.'
-        });
-      }
+      if (meterIds.length === 0) return res.json([]);
 
       const readings = await Reading.findAll({
         where: { meter_id: meterIds }
       });
 
-      if (readings.length === 0) {
-        return res.status(403).json({
-          error: 'No access: There are no meter readings under your assigned building.'
-        });
-      }
-
-      res.json(readings);
+      return res.json(readings); // 200 with [] if none
     } catch (err) {
       console.error('Database error:', err);
       res.status(500).json({ error: err.message });
@@ -112,10 +100,10 @@ router.get('/',
 /**
  * GET METER READING BY ID
  * - Admins: full access
- * - Employees: only if the reading’s meter’s stall is in their building
+ * - Operators: only if the reading’s meter’s stall is in their building
  */
 router.get('/:id',
-  authorizeRole('admin', 'employee'),
+  authorizeRole('admin', 'operator'),
   async (req, res) => {
     try {
       const readingId = req.params.id;
@@ -149,13 +137,15 @@ router.get('/:id',
 
 /**
  * CREATE NEW METER READING
- * - Admins: unrestricted
- * - Employees: meter_id must belong to a stall under their building
+ * - Admins and Readers only (operator cannot create)
+ * - Reader must have utility access for the meter (electric/water/lpg)  ⬅️ NEW CHECK
+ * - Non-admin must create for meters under their building
  * - lastread_date/read_by are NOT NULL → always set
  * - lastread_date: manual input; defaults to today (YYYY-MM-DD) if omitted
  */
 router.post('/',
-  authorizeRole('admin', 'employee'),
+  authorizeRole('admin', 'reader'),
+  authorizeUtilityRole({ roles: ['reader'] }), // ⬅️ NEW: reader must be allowed for meter’s utility
   async (req, res) => {
     const { meter_id, reading_value, lastread_date } = req.body;
     if (!meter_id || reading_value === undefined) {
@@ -175,6 +165,7 @@ router.post('/',
         }
       }
 
+      // Generate new MR-<n>
       const lastReading = await Reading.findOne({
         where: { reading_id: { [Op.like]: 'MR-%' } },
         order: [[literal("CAST(SUBSTRING(reading_id, 4) AS UNSIGNED)"), "DESC"]],
@@ -205,6 +196,7 @@ router.post('/',
       res.status(201).json({ message: 'Reading created successfully', readingId: newReadingId });
     } catch (err) {
       console.error('Error in POST /meter_reading:', err);
+      // If UNIQUE(meter_id,lastread_date) is violated, MySQL will throw ER_DUP_ENTRY
       res.status(500).json({ error: err.message });
     }
   }
@@ -214,11 +206,10 @@ router.post('/',
 /**
  * UPDATE METER READING BY ID
  * - Admins: unrestricted
- * - Employees: can only update readings under their building
- * - Keep lastread_date NOT NULL; allow manual updates; keep read_by NOT NULL
+ * - Operators: can only update readings under their building
  */
 router.put('/:id',
-  authorizeRole('admin', 'employee'),
+  authorizeRole('admin', 'operator'),
   async (req, res) => {
     const readingId = req.params.id;
     const { meter_id, reading_value, lastread_date } = req.body;
@@ -255,14 +246,13 @@ router.put('/:id',
       if (meter_id) reading.meter_id = meter_id;
       if (reading_value !== undefined) reading.reading_value = reading_value;
 
-      // Maintain NOT NULL lastread_date; allow manual edit; if omitted, keep current value
       if (lastread_date !== undefined) {
+        // maintain NOT NULL lastread_date; allow manual edit; if omitted, keep current value
         reading.lastread_date = lastread_date || new Date().toISOString().slice(0, 10);
       }
 
       // Always stamp who performed the edit to satisfy NOT NULL read_by
       reading.read_by = updatedBy;
-
       reading.last_updated = now;
       reading.updated_by = updatedBy;
 
@@ -279,10 +269,10 @@ router.put('/:id',
 /**
  * DELETE METER READING BY ID
  * - Admins: unrestricted
- * - Employees: can only delete readings under their building
+ * - Operators: can only delete readings under their building
  */
 router.delete('/:id',
-  authorizeRole('admin', 'employee'),
+  authorizeRole('admin', 'operator'),
   async (req, res) => {
     const readingId = req.params.id;
     if (!readingId) {

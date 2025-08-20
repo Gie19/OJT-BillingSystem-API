@@ -15,6 +15,7 @@ var meterRouter = require('./routes/meters');
 var readingsRouter = require('./routes/readings');
 var ratesRouter = require('./routes/rates');
 var buildingsRouter = require('./routes/buildings');
+var billingsRouter = require('./routes/billings');
 
 
 // Sequelize setup
@@ -41,6 +42,7 @@ app.use('/meters', meterRouter);
 app.use('/readings', readingsRouter);
 app.use('/rates', ratesRouter);
 app.use('/buildings', buildingsRouter);
+app.use('/billings', billingsRouter);
 
 
 // catch 404 and forward to error handler
