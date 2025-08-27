@@ -25,7 +25,7 @@ router.use(authenticateToken);
  * - Operators: only tenants in their assigned building_id
  */
 router.get('/',
-  authorizeRole('admin','operator'),
+  authorizeRole('admin','operator','biller'),
   attachBuildingScope(),
   async (req, res) => {
     try {
@@ -45,7 +45,7 @@ router.get('/',
  * - Operators: only if tenant.building_id === req.user.building_id
  */
 router.get('/:id',
-  authorizeRole('admin','operator'),
+  authorizeRole('admin','operator','biller'),
   enforceRecordBuilding(async (req) => {
     const tenant = await Tenant.findOne({
       where: { tenant_id: req.params.id },
