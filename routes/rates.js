@@ -93,13 +93,15 @@ router.get(
   }
 );
 
-/** PUT create/update a tenant’s rate (admin | biller in-building + utility scope) */
+// PUT (create/update) a tenant's rate via URL params
+// Path: /rates/buildings/:building_id/tenants/:tenant_id
 router.put(
   '/buildings/:building_id/tenants/:tenant_id',
   authorizeRole('admin', 'biller'),
-  authorizeBuildingParam(),
-  authorizeUtilityRole({ roles: ['biller'], anyOf: ['electric', 'water', 'lpg'], requireAll: false }),
+  authorizeBuildingParam(),  // non-admin must match :building_id
+  authorizeUtilityRole({ roles: ['biller'], anyOf: ['electric','water','lpg'], requireAll: false }),
   enforceRecordBuilding(async (req) => {
+    // ensure the tenant truly belongs to the path building
     const t = await Tenant.findOne({
       where: { tenant_id: req.params.tenant_id },
       attributes: ['building_id'],
@@ -111,22 +113,24 @@ router.put(
     try {
       const tenantId = req.params.tenant_id;
 
-      // Pull only fields allowed for this biller’s utilities
+      // Admin can touch any fields; biller limited by utility_role
+      const isAdmin = (req.user.user_level || '').toLowerCase() === 'admin';
       const userUtils = Array.isArray(req.user.utility_role)
         ? req.user.utility_role.map(s => String(s).toLowerCase())
         : [];
-      const allowedBody = filterRateFieldsByUtility(req.body, userUtils);
+      const allowedBody = isAdmin ? req.body : filterRateFieldsByUtility(req.body, userUtils);
 
-      if (Object.keys(allowedBody).length === 0 && (req.user.user_level || '').toLowerCase() !== 'admin') {
+      if (!isAdmin && Object.keys(allowedBody).length === 0) {
         return res.status(400).json({ error: 'No permitted rate fields to update for your utility access.' });
       }
 
+      // Upsert by tenant_id
       let rate = await Rate.findOne({ where: { tenant_id: tenantId } });
       const now = getCurrentDateTime();
       const updatedBy = req.user.user_fullname;
 
       if (!rate) {
-        // create new rate row with generated rate_id
+        // Generate RATE-<n>
         const last = await Rate.findOne({
           where: { rate_id: { [Op.like]: 'RATE-%' } },
           order: [[literal("CAST(SUBSTRING(rate_id, 6) AS UNSIGNED)"), 'DESC']],
@@ -139,35 +143,31 @@ router.put(
         }
         const newRateId = `RATE-${nextNum}`;
 
-        // Admin may set any field; biller restricted to allowedBody
-        const toCreate = {
+        await Rate.create({
           rate_id: newRateId,
           tenant_id: tenantId,
           last_updated: now,
           updated_by: updatedBy,
-          ...( (req.user.user_level || '').toLowerCase() === 'admin' ? req.body : allowedBody )
-        };
-        rate = await Rate.create(toCreate);
+          ...allowedBody
+        });
+
         return res.status(201).json({ message: 'Rate created for tenant', rate_id: newRateId });
       }
 
-      const toUpdate = {
+      await rate.update({
         last_updated: now,
         updated_by: updatedBy,
-        ...( (req.user.user_level || '').toLowerCase() === 'admin' ? req.body : allowedBody )
-      };
-      await rate.update(toUpdate);
+        ...allowedBody
+      });
 
       res.json({ message: 'Rate updated for tenant', rate_id: rate.rate_id });
     } catch (err) {
-      console.error('PUT tenant rate error:', err);
-      if (err?.original?.code === 'ER_DUP_ENTRY') {
-        return res.status(409).json({ error: 'This tenant already has a rate.' });
-      }
-      res.status(500).json({ error: 'Server error' });
+      console.error('PUT tenant rate (param) error:', err);
+      res.status(500).json({ error: err.message });
     }
   }
 );
+
 
 /** DELETE a tenant’s rate (admin | biller in-building) */
 router.delete(

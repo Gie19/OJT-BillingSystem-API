@@ -21,7 +21,8 @@ const isAdmin = (req) => (req.user?.user_level || '').toLowerCase() === 'admin';
 async function getMeterBuildingAndTenant(meterId) {
   const meter = await Meter.findOne({
     where: { meter_id: meterId },
-    attributes: ['stall_id', 'meter_type', 'meter_mult', 'rollover_value'], // rollover_value optional
+    // removed 'rollover_value' – column not present in DB
+    attributes: ['stall_id', 'meter_type', 'meter_mult'],
     raw: true
   });
   if (!meter) return { meter: null, stall: null };
@@ -34,7 +35,7 @@ async function getMeterBuildingAndTenant(meterId) {
   return { meter, stall };
 }
 
-// Optional support for rolling over cumulative meters (e.g., 99999 → 00000)
+// Kept for clarity; we pass rollover = null to disable it
 function deltaWithRollover(curr, prev, rollover) {
   let d = curr - prev;
   const r = Number(rollover);
@@ -46,7 +47,7 @@ function deltaWithRollover(curr, prev, rollover) {
 
 // ---------- SINGLE METER PREVIEW ----------
 router.get(
-  '/meters/:meter_id/preview',
+  '/meters/:meter_id',
   authorizeRole('admin', 'operator', 'biller'),
   authorizeUtilityRole({ roles: ['operator', 'biller'], anyOf: ['electric', 'water', 'lpg'], requireAll: false }),
   async (req, res) => {
@@ -88,7 +89,7 @@ router.get(
       // 5) Compute
       const mtype = String(meter.meter_type || '').toLowerCase();
       const mult  = Number(meter.meter_mult) || 1.0;
-      const rollover = meter.rollover_value;
+      const rollover = null; // disabled
 
       const v0 = Number(rows[0].reading_value) || 0; // latest
       const v1 = rows[1] ? (Number(rows[1].reading_value) || 0) : null;
@@ -204,7 +205,7 @@ router.get(
 
 // ---------- TENANT AGGREGATE PREVIEW ----------
 router.get(
-  '/tenants/:tenant_id/preview',
+  '/tenants/:tenant_id/',
   authorizeRole('admin', 'operator', 'biller'),
   async (req, res) => {
     try {
@@ -250,10 +251,10 @@ router.get(
         });
       }
 
-      // Get all meters under those stalls
+      // Get all meters under those stalls (no rollover)
       const meters = await Meter.findAll({
         where: { stall_id: stallIds },
-        attributes: ['meter_id', 'meter_type', 'meter_mult', 'rollover_value'],
+        attributes: ['meter_id', 'meter_type', 'meter_mult'],
         raw: true
       });
       if (meters.length === 0) {
@@ -297,7 +298,7 @@ router.get(
 
         const mtype = String(m.meter_type || '').toLowerCase();
         const mult  = Number(m.meter_mult) || 1.0;
-        const rollover = m.rollover_value;
+        const rollover = null; // disabled
 
         const v0 = Number(rows[0].reading_value) || 0;
         const v1 = rows[1] ? (Number(rows[1].reading_value) || 0) : null;
