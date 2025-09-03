@@ -7,14 +7,18 @@ const User = sequelize.define('User', {
     primaryKey: true
   },
   user_password: DataTypes.STRING,
-  user_fullname: DataTypes.STRING, // DB is VARCHAR(50)
-  // NEW role set per your schema
-  user_level: DataTypes.ENUM('admin', 'operator', 'biller', 'reader'),
-  // Nullable in DB; Sequelize doesn’t enforce NOT NULL unless specified
-  building_id: DataTypes.STRING,
-  // NEW: per-utility allow-list (JSON)
+  user_fullname: DataTypes.STRING,
+  // Updated roles: admin | operator | biller
+  user_level: DataTypes.ENUM('admin', 'operator', 'biller'),
+  // Admins may have null building_id
+  building_id: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    defaultValue: null
+  },
+  // Only billers use this now; operators ignore it
   utility_role: {
-    type: DataTypes.JSON, // MariaDB stores JSON as LONGTEXT + CHECK (json_valid(...))
+    type: DataTypes.JSON,
     allowNull: true,
     defaultValue: null
   }

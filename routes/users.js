@@ -12,14 +12,15 @@ const { Op, literal } = require('sequelize');
 // Model
 const User = require('../models/User');
 
-const ALLOWED_ROLES = new Set(['admin', 'operator', 'biller', 'reader']);
+// Allowed roles (reader removed; operator kept; biller kept)
+const ALLOWED_ROLES = new Set(['admin', 'operator', 'biller']);
 const ALLOWED_UTILS = new Set(['electric', 'water', 'lpg']);
 
 // All routes below require a valid token
 router.use(authenticateToken);
 
 // GET ALL USERS (admin only)
-router.get('/', authorizeRole('admin'), async (req, res) => {
+router.get('/', authorizeRole('admin'), async (_req, res) => {
   try {
     const users = await User.findAll();
     res.json(users);
@@ -47,29 +48,25 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
     user_password,
     user_fullname,
     user_level,
-    building_id,       // optional for admin
-    utility_role       // optional array of strings
+    building_id,
+    utility_role
   } = req.body;
 
-  // Basic presence checks
+  // Basic presence checks (building_id required for non-admins)
   if (!user_password || !user_fullname || !user_level) {
     return res.status(400).json({ error: 'user_password, user_fullname, and user_level are required' });
   }
-
-  // Role validation
-  if (!ALLOWED_ROLES.has(String(user_level).toLowerCase())) {
+  const role = String(user_level).toLowerCase();
+  if (!ALLOWED_ROLES.has(role)) {
     return res.status(400).json({ error: 'Invalid user_level' });
   }
-
-  // building_id required for non-admins
-  const role = String(user_level).toLowerCase();
   if (role !== 'admin' && !building_id) {
     return res.status(400).json({ error: 'building_id is required for non-admin users' });
   }
 
-  // utility_role validation: must be array of allowed values if provided
+  // utility_role is ONLY meaningful for biller now; operators ignore it
   let utilPayload = null;
-  if (utility_role != null) {
+  if (utility_role != null && role === 'biller') {
     if (!Array.isArray(utility_role)) {
       return res.status(400).json({ error: 'utility_role must be an array of strings' });
     }
@@ -77,7 +74,6 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
     if (!clean.every(v => ALLOWED_UTILS.has(v))) {
       return res.status(400).json({ error: 'utility_role contains invalid utility. Allowed: electric, water, lpg' });
     }
-    // Only biller/reader meaningfully use utility_role; for others we’ll still store it if provided
     utilPayload = clean;
   }
 
@@ -103,9 +99,9 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
       user_id: newUserId,
       user_password: hashedPassword,
       user_fullname,
-      user_level: role,                // store normalized
-      building_id: building_id || null,
-      utility_role: utilPayload
+      user_level: role,
+      building_id: role === 'admin' ? null : building_id,
+      utility_role: role === 'biller' ? utilPayload : null
     });
 
     res.status(201).json({
@@ -150,32 +146,33 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
 
     const updatedFields = {};
 
+    // Fullname
     if (user_fullname != null) updatedFields.user_fullname = user_fullname;
 
+    // Role change
     if (user_level != null) {
       const lvl = String(user_level).toLowerCase();
       if (!ALLOWED_ROLES.has(lvl)) {
         return res.status(400).json({ error: 'Invalid user_level' });
       }
       updatedFields.user_level = lvl;
-
-      // If switching to admin, allow building_id to go null
-      if (lvl === 'admin' && building_id === undefined) {
-        // leave building_id as-is unless explicitly provided
-      }
     }
+    const effectiveLevel = (updatedFields.user_level || user.user_level || '').toLowerCase();
 
+    // Building rules
     if (building_id !== undefined) {
-      // require building for non-admins
-      const effectiveLevel = (updatedFields.user_level || user.user_level || '').toLowerCase();
       if (effectiveLevel !== 'admin' && !building_id) {
         return res.status(400).json({ error: 'building_id is required for non-admin users' });
       }
-      updatedFields.building_id = building_id || null;
+      updatedFields.building_id = effectiveLevel === 'admin' ? null : building_id;
     }
 
+    // Utility role rules — only biller uses it now
     if (utility_role !== undefined) {
-      if (utility_role === null) {
+      if (effectiveLevel !== 'biller') {
+        // Ignore or clear for non-billers
+        updatedFields.utility_role = null;
+      } else if (utility_role === null) {
         updatedFields.utility_role = null;
       } else if (Array.isArray(utility_role)) {
         const clean = utility_role.map(x => String(x).toLowerCase());
@@ -188,6 +185,7 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
       }
     }
 
+    // Password
     if (user_password) {
       updatedFields.user_password = await hashPassword(user_password);
     }

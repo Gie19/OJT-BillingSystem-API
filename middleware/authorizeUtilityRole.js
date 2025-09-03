@@ -6,7 +6,7 @@ const Stall = require('../models/Stall');
  * Enforce per-utility access (electric | water | lpg) for selected roles.
  *
  * Options:
- *  - roles:        roles this applies to (default ['reader','biller'])
+ *  - roles:        roles this applies to (default ['biller'])   <-- operators no longer checked here
  *  - anyOf:        when no meter is involved, require these utilities
  *  - requireAll:   if true require ALL in anyOf, else ANY one (default true)
  *  - adminBypass:  admins skip the check (default true)
@@ -21,7 +21,7 @@ const Stall = require('../models/Stall');
  */
 function authorizeUtilityRole(opts = {}) {
   const {
-    roles = ['reader', 'biller'],
+    roles = ['biller'],
     anyOf = null,
     requireAll = true,
     adminBypass = true,
@@ -41,7 +41,7 @@ function authorizeUtilityRole(opts = {}) {
       // Admin bypass
       if (adminBypass && level === 'admin') return next();
 
-      // If the caller's role isn't in scope, skip (operators, etc.)
+      // If the caller's role isn't in scope, skip checks (operators are not included anymore)
       if (!ENFORCED_ROLES.includes(level)) return next();
 
       // Normalize user's allowed utilities
