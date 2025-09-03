@@ -5,7 +5,6 @@ const router = express.Router();
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
-const authorizeUtilityRole = require('../middleware/authorizeUtilityRole'); // ⬅️ NEW
 
 const { Op, literal } = require('sequelize');
 
@@ -136,16 +135,67 @@ router.get('/:id',
 );
 
 /**
- * CREATE NEW METER READING
- * - Admins and Readers only (operator cannot create)
- * - Reader must have utility access for the meter (electric/water/lpg)  ⬅️ NEW CHECK
- * - Non-admin must create for meters under their building
+ * GET readings for a specific date (YYYY-MM-DD)
+ * - Admin: all meters; Operator: only their building
+ */
+router.get('/by-date/:date',
+  authorizeRole('admin', 'operator'),
+  async (req, res) => {
+    const date = req.params.date;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD.' });
+    }
+
+    try {
+      if (isAdmin(req)) {
+        const rows = await Reading.findAll({ where: { lastread_date: date } });
+        return res.json(rows);
+      }
+
+      const buildingId = req.user?.building_id;
+      if (!buildingId) return res.status(401).json({ error: 'Unauthorized: No building assigned' });
+
+      const stalls = await Stall.findAll({ where: { building_id: buildingId }, attributes: ['stall_id'], raw: true });
+      const stallIds = stalls.map(s => s.stall_id);
+      if (!stallIds.length) return res.json([]);
+
+      const meters = await Meter.findAll({ where: { stall_id: stallIds }, attributes: ['meter_id'], raw: true });
+      const meterIds = meters.map(m => m.meter_id);
+      if (!meterIds.length) return res.json([]);
+
+      const rows = await Reading.findAll({
+        where: { meter_id: meterIds, lastread_date: date }
+      });
+      return res.json(rows);
+    } catch (err) {
+      console.error('by-date error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+/**
+ * GET today's readings
+ */
+router.get('/today',
+  authorizeRole('admin', 'operator'),
+  async (req, res) => {
+    const today = new Date().toISOString().slice(0, 10);
+    req.params.date = today;
+    return router.handle({ ...req, url: `/meter_reading/by-date/${today}`, method: 'GET' }, res);
+  }
+);
+
+/**
+ * CREATE NEW METER READING (daily)
+ * - Admins and Operators
+ * - Operator must create for meters under their own building (no utility filter)
+ * - Enforce DAILY: only one reading per meter per lastread_date
  * - lastread_date/read_by are NOT NULL → always set
  * - lastread_date: manual input; defaults to today (YYYY-MM-DD) if omitted
  */
 router.post('/',
-  authorizeRole('admin', 'reader'),
-  authorizeUtilityRole({ roles: ['reader'] }), // ⬅️ NEW: reader must be allowed for meter’s utility
+  authorizeRole('admin', 'operator'),
   async (req, res) => {
     const { meter_id, reading_value, lastread_date } = req.body;
     if (!meter_id || reading_value === undefined) {
@@ -165,6 +215,20 @@ router.post('/',
         }
       }
 
+      // DAILY ENFORCEMENT
+      const dateOnly = (lastread_date && /^\d{4}-\d{2}-\d{2}$/.test(lastread_date))
+        ? lastread_date
+        : new Date().toISOString().slice(0, 10);
+
+      const existing = await Reading.findOne({
+        where: { meter_id, lastread_date: dateOnly },
+        attributes: ['reading_id'],
+        raw: true
+      });
+      if (existing) {
+        return res.status(409).json({ error: `Reading already exists for ${meter_id} on ${dateOnly}` });
+      }
+
       // Generate new MR-<n>
       const lastReading = await Reading.findOne({
         where: { reading_id: { [Op.like]: 'MR-%' } },
@@ -180,14 +244,11 @@ router.post('/',
       const now = getCurrentDateTime();
       const updatedBy = req.user.user_fullname;
 
-      const today = new Date().toISOString().slice(0, 10);
-      const finalLastReadDate = lastread_date || today;
-
       await Reading.create({
         reading_id: newReadingId,
         meter_id,
         reading_value,
-        lastread_date: finalLastReadDate,      // NOT NULL (DATEONLY)
+        lastread_date: dateOnly,               // DAILY
         read_by: updatedBy,                    // NOT NULL
         last_updated: now,
         updated_by: updatedBy
@@ -196,17 +257,17 @@ router.post('/',
       res.status(201).json({ message: 'Reading created successfully', readingId: newReadingId });
     } catch (err) {
       console.error('Error in POST /meter_reading:', err);
-      // If UNIQUE(meter_id,lastread_date) is violated, MySQL will throw ER_DUP_ENTRY
+      // If DB unique index exists, ER_DUP_ENTRY will surface here too
       res.status(500).json({ error: err.message });
     }
   }
 );
 
-
 /**
  * UPDATE METER READING BY ID
  * - Admins: unrestricted
  * - Operators: can only update readings under their building
+ * - DAILY: if lastread_date changes, enforce uniqueness per meter/day
  */
 router.put('/:id',
   authorizeRole('admin', 'operator'),
@@ -243,15 +304,37 @@ router.put('/:id',
         return res.status(400).json({ message: 'No changes detected in the request body.' });
       }
 
+      // DAILY ENFORCEMENT on date change
+      if (lastread_date !== undefined) {
+        const dateOnly = lastread_date
+          ? (/^\d{4}-\d{2}-\d{2}$/.test(lastread_date) ? lastread_date : null)
+          : new Date().toISOString().slice(0, 10);
+
+        if (!dateOnly) {
+          return res.status(400).json({ error: 'Invalid lastread_date format. Use YYYY-MM-DD.' });
+        }
+
+        const targetMeterId = meter_id || reading.meter_id;
+        const clash = await Reading.findOne({
+          where: {
+            meter_id: targetMeterId,
+            lastread_date: dateOnly,
+            reading_id: { [Op.ne]: readingId }
+          },
+          attributes: ['reading_id'],
+          raw: true
+        });
+        if (clash) {
+          return res.status(409).json({ error: `Reading already exists for ${targetMeterId} on ${dateOnly}` });
+        }
+
+        reading.lastread_date = dateOnly; // keep NOT NULL
+      }
+
       if (meter_id) reading.meter_id = meter_id;
       if (reading_value !== undefined) reading.reading_value = reading_value;
 
-      if (lastread_date !== undefined) {
-        // maintain NOT NULL lastread_date; allow manual edit; if omitted, keep current value
-        reading.lastread_date = lastread_date || new Date().toISOString().slice(0, 10);
-      }
-
-      // Always stamp who performed the edit to satisfy NOT NULL read_by
+      // Always stamp who performed the edit
       reading.read_by = updatedBy;
       reading.last_updated = now;
       reading.updated_by = updatedBy;
@@ -264,7 +347,6 @@ router.put('/:id',
     }
   }
 );
-
 
 /**
  * DELETE METER READING BY ID

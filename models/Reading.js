@@ -35,6 +35,10 @@ const Reading = sequelize.define('Reading', {
 }, {
   tableName: 'meter_reading',
   timestamps: false,
+  indexes: [
+    // Enforce ONE reading per meter per day
+    { unique: true, fields: ['meter_id', 'lastread_date'] }
+  ]
 });
 
 module.exports = Reading;
