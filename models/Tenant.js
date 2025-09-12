@@ -1,20 +1,41 @@
+// models/Tenant.js
 const { DataTypes } = require('sequelize');
 const sequelize = require('./index');
 
 const Tenant = sequelize.define('Tenant', {
   tenant_id: {
     type: DataTypes.STRING,
-    primaryKey: true
+    primaryKey: true,
   },
   tenant_sn: {
     type: DataTypes.STRING,
-    unique: true
+    unique: true,
   },
-  tenant_name: DataTypes.STRING,
-  building_id: DataTypes.STRING,
-  bill_start: DataTypes.DATEONLY,   // <-- 'date' in SQL, use DATEONLY
-  last_updated: DataTypes.DATE,     // <-- 'datetime' in SQL, use DATE
-  updated_by: DataTypes.STRING
+  tenant_name: {
+    type: DataTypes.STRING,
+    allowNull: false,
+  },
+  building_id: {
+    type: DataTypes.STRING,
+    allowNull: false,
+  },
+  bill_start: {
+    type: DataTypes.DATEONLY, // DATE in SQL
+    allowNull: false,
+  },
+  tenant_status: {
+    type: DataTypes.ENUM('active', 'inactive'),
+    allowNull: false,
+    defaultValue: 'active',
+  },
+  last_updated: {
+    type: DataTypes.DATE, // DATETIME in SQL
+    allowNull: false,
+  },
+  updated_by: {
+    type: DataTypes.STRING,
+    allowNull: false,
+  },
 }, {
   tableName: 'tenant_list',
   timestamps: false,
