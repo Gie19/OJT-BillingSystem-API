@@ -239,7 +239,7 @@ router.get(
       // 6) Detect downtime windows (zeros), each ending on the last zero day
       const zeroRuns = await getZeroRuns(meterId, currStart, currEnd);
 
-      // 7) Build split segments (billable/downtime)
+      // 7) Build split segments (billable/downtime) for CURRENT period
       const segments = [];
       let anchorIdx = Number(prevMax.value); // first billable baseline
       let pointer   = currStart;
@@ -269,7 +269,6 @@ router.get(
           start: run.start,
           end: run.end,
           reason: 'zero readings',
-          // Billing set later as null/0 in the final mapping
         });
 
         // Next billable start
@@ -293,9 +292,9 @@ router.get(
         }
       }
 
-      // 8) Grouped output: keep all data per period
+      // 8) Grouped output: keep all data per period (CURRENT)
       const periods = segments.map(s => ({
-        type: s.type, // "billable" | "downtime"
+        type: s.type,
         start: s.start,
         end: s.end,
         ...(s.type === 'downtime' ? { reason: s.reason || 'zero readings' } : {}),
@@ -309,7 +308,7 @@ router.get(
         }
       }));
 
-      // 9) Roll-up totals across BILLABLE periods
+      // 9) Roll-up totals across BILLABLE periods (CURRENT)
       const totals = periods.reduce((acc, p) => {
         if (p.type !== 'billable') return acc;
         acc.consumption += Number(p.bill.consumption) || 0;
@@ -319,21 +318,70 @@ router.get(
         return acc;
       }, { consumption: 0, base: 0, vat: 0, total: 0 });
 
-      // 9b) Compute rate of change (consumption) as percentage, rounded up
+      // --- Compute PREVIOUS period consumption the same way ---
+      const { prevStart: prePrevStart, prevEnd: prePrevEnd } = getPreviousPeriodFromCurrent(prevStart);
+      const prePrevMax = await getMaxReadingInPeriod(meterId, prePrevStart, prePrevEnd);
+
+      let prevTotals = { consumption: 0, base: 0, vat: 0, total: 0 };
+      let previousConsumption = null;
+
+      if (prePrevMax && prevMax) {
+        const zeroRunsPrev = await getZeroRuns(meterId, prevStart, prevEnd);
+
+        const prevSegments = [];
+        let anchorPrevIdx = Number(prePrevMax.value);
+        let prevPtr       = prevStart;
+
+        for (const run of zeroRunsPrev) {
+          const preEnd2 = (BOUNDARY_MODE === 'include_zero_edge') ? run.start : dayBefore(run.start);
+          if (prevPtr <= preEnd2) {
+            const segMax = await getMaxReadingInPeriod(meterId, prevPtr, preEnd2);
+            if (segMax) {
+              const ch = computeChargesByType(mtype, mult, rate, anchorPrevIdx, segMax.value);
+              prevSegments.push({ type: 'billable', ...ch });
+              anchorPrevIdx = Number(segMax.value);
+            }
+          }
+          // downtime (ignored in totals)
+          prevPtr = (BOUNDARY_MODE === 'include_zero_edge') ? run.end : dayAfter(run.end);
+        }
+
+        if (prevPtr <= prevEnd) {
+          const segMax = await getMaxReadingInPeriod(meterId, prevPtr, prevEnd);
+          if (segMax) {
+            const ch = computeChargesByType(mtype, mult, rate, anchorPrevIdx, segMax.value);
+            prevSegments.push({ type: 'billable', ...ch });
+            anchorPrevIdx = Number(segMax.value);
+          }
+        }
+
+        prevTotals = prevSegments.reduce((acc, s) => {
+          acc.consumption += Number(s.consumption) || 0;
+          acc.base        += Number(s.base) || 0;
+          acc.vat         += Number(s.vat) || 0;
+          acc.total       += Number(s.total) || 0;
+          return acc;
+        }, { consumption: 0, base: 0, vat: 0, total: 0 });
+
+        previousConsumption = round(prevTotals.consumption, 2);
+      }
+
+      // 9b) Compute rate of change using CONSUMPTIONS (percentage, rounded up)
+      const currentConsumption = round(totals.consumption, 2);
       let rateOfChange = null;
-      const prevConsumption = Number(prevMax.value);
-      const currConsumption = Number(currMax.value);
-      if (prevConsumption > 0) {
-        rateOfChange = Math.ceil(((currConsumption - prevConsumption) / prevConsumption) * 100);
+      if ((previousConsumption || 0) > 0) {
+        rateOfChange = Math.ceil(((currentConsumption - previousConsumption) / previousConsumption) * 100);
       }
 
       // 10) Respond with simplified, grouped payload
       return res.json({
         meter_id: meterId,
         meter_type: mtype,
-        periods,    // clean, split periods with all numbers retained
-        totals,     // billable-only rollup
-        rate_of_change: rateOfChange // percentage integer
+        periods,                 // current period split
+        totals,                  // current period rollup
+        current_consumption: currentConsumption,   // <-- NEW transparency field
+        previous_consumption: previousConsumption, // <-- NEW transparency field (may be null)
+        rate_of_change: rateOfChange               // percentage (int), based on consumptions
       });
 
     } catch (err) {
