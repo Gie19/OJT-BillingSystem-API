@@ -319,12 +319,21 @@ router.get(
         return acc;
       }, { consumption: 0, base: 0, vat: 0, total: 0 });
 
+      // 9b) Compute rate of change (consumption) as percentage, rounded up
+      let rateOfChange = null;
+      const prevConsumption = Number(prevMax.value);
+      const currConsumption = Number(currMax.value);
+      if (prevConsumption > 0) {
+        rateOfChange = Math.ceil(((currConsumption - prevConsumption) / prevConsumption) * 100);
+      }
+
       // 10) Respond with simplified, grouped payload
       return res.json({
         meter_id: meterId,
         meter_type: mtype,
         periods,    // clean, split periods with all numbers retained
-        totals      // billable-only rollup
+        totals,     // billable-only rollup
+        rate_of_change: rateOfChange // percentage integer
       });
 
     } catch (err) {
