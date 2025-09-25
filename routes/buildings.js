@@ -5,6 +5,8 @@ const router = express.Router();
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
+const authorizeUtilityRole = require('../middleware/authorizeUtilityRole');
+const { authorizeBuildingParam } = require('../middleware/authorizeBuilding');
 
 // Sequelize helpers
 const { Op, literal } = require('sequelize');
@@ -17,6 +19,22 @@ const Building = require('../models/Building');
 
 // All routes below require a valid token
 router.use(authenticateToken);
+
+/** Helper: filter which base-rate fields a biller may edit */
+function filterBuildingBaseRatesByUtility(reqBody, userUtilities) {
+  const map = {
+    electric: ['erate_perKwH', 'emin_con'],
+    water:    ['wrate_perCbM', 'wmin_con'],
+    lpg:      ['lrate_perKg'],
+  };
+  const allowed = new Set();
+  (userUtilities || []).forEach(u => (map[u] || []).forEach(f => allowed.add(f)));
+  const out = {};
+  for (const [k, v] of Object.entries(reqBody || {})) {
+    if (allowed.has(k)) out[k] = v;
+  }
+  return out;
+}
 
 /**
  * GET /buildings
@@ -50,7 +68,7 @@ router.get('/:id', authorizeRole('admin'), async (req, res) => {
 /**
  * POST /buildings
  * Admin-only: create a new building
- * Body: { building_name }
+ * Body: { building_name, [erate_perKwH, emin_con, wrate_perCbM, wmin_con, lrate_perKg] }
  */
 router.post('/', authorizeRole('admin'), async (req, res) => {
   const { building_name } = req.body;
@@ -73,15 +91,24 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
     }
 
     const newBuildingId = `BLDG-${nextNumber}`;
-    const today = getCurrentDateTime();
+    const now = getCurrentDateTime();
     const updatedBy = req.user.user_fullname;
 
-    await Building.create({
+    const payload = {
       building_id: newBuildingId,
       building_name,
-      last_updated: today,
-      updated_by: updatedBy
-    });
+      last_updated: now,
+      updated_by: updatedBy,
+    };
+
+    // Allow optional base rates on create
+    const baseFields = ['erate_perKwH','emin_con','wrate_perCbM','wmin_con','lrate_perKg'];
+    for (const f of baseFields) {
+      if (f in req.body) payload[f] = req.body[f];
+    }
+
+    await Building.create(payload);
+
     res.status(201).json({
       message: 'Building created successfully',
       buildingId: newBuildingId
@@ -94,15 +121,14 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
 
 /**
  * PUT /buildings/:id
- * Admin-only: update an existing building's name
- * Body: { building_name }
+ * Admin-only: update name and/or any base rates
+ * Body: { building_name?, erate_perKwH?, emin_con?, wrate_perCbM?, wmin_con?, lrate_perKg? }
  */
 router.put('/:id', authorizeRole('admin'), async (req, res) => {
   const buildingId = req.params.id;
-  const { building_name } = req.body;
 
-  if (!buildingId || !building_name) {
-    return res.status(400).json({ error: 'building_name is required' });
+  if (!buildingId) {
+    return res.status(400).json({ error: 'building_id is required' });
   }
 
   try {
@@ -111,21 +137,98 @@ router.put('/:id', authorizeRole('admin'), async (req, res) => {
       return res.status(404).json({ error: 'Building not found' });
     }
 
-    const today = getCurrentDateTime();
+    const now = getCurrentDateTime();
     const updatedBy = req.user.user_fullname;
 
-    await building.update({
-      building_name,
-      last_updated: today,
+    const up = {
+      last_updated: now,
       updated_by: updatedBy
+    };
+
+    const allowed = ['building_name','erate_perKwH','emin_con','wrate_perCbM','wmin_con','lrate_perKg'];
+    allowed.forEach(f => {
+      if (f in req.body) up[f] = req.body[f];
     });
 
+    await building.update(up);
     res.json({ message: 'Building updated successfully' });
   } catch (err) {
     console.error('Error in PUT /buildings/:id:', err);
     res.status(500).json({ error: err.message });
   }
 });
+
+/**
+ * GET /buildings/:id/base-rates
+ * Admin or biller (scoped): fetch only base-rate fields
+ */
+router.get(
+  '/:id/base-rates',
+  authorizeRole('admin','biller'),
+  authorizeBuildingParam(), // for non-admin, must match their building
+  async (req, res) => {
+    try {
+      const building = await Building.findOne({
+        where: { building_id: req.params.id },
+        attributes: ['building_id','erate_perKwH','emin_con','wrate_perCbM','wmin_con','lrate_perKg','last_updated','updated_by']
+      });
+      if (!building) return res.status(404).json({ message: 'Building not found' });
+      res.json(building);
+    } catch (err) {
+      console.error('GET /buildings/:id/base-rates error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+/**
+ * PUT /buildings/:id/base-rates
+ * Admin or biller (scoped): update base-rate fields only
+ * - Admin may edit any base-rate field
+ * - Biller may only edit fields for utilities in their utility_role
+ */
+router.put(
+  '/:id/base-rates',
+  authorizeRole('admin','biller'),
+  authorizeBuildingParam(),
+  authorizeUtilityRole({ roles: ['biller'], anyOf: ['electric','water','lpg'], requireAll: false }),
+  async (req, res) => {
+    try {
+      const building = await Building.findOne({ where: { building_id: req.params.id } });
+      if (!building) return res.status(404).json({ error: 'Building not found' });
+
+      const isAdmin = (req.user.user_level || '').toLowerCase() === 'admin';
+      const userUtils = Array.isArray(req.user.utility_role)
+        ? req.user.utility_role.map(s => String(s).toLowerCase())
+        : [];
+
+      let up = {};
+      if (isAdmin) {
+        const baseFields = ['erate_perKwH','emin_con','wrate_perCbM','wmin_con','lrate_perKg'];
+        baseFields.forEach(f => { if (f in req.body) up[f] = req.body[f]; });
+      } else {
+        up = filterBuildingBaseRatesByUtility(req.body, userUtils);
+        if (Object.keys(up).length === 0) {
+          return res.status(400).json({ error: 'No permitted base-rate fields to update for your utility access.' });
+        }
+      }
+
+      const now = getCurrentDateTime();
+      const updatedBy = req.user.user_fullname;
+
+      await building.update({
+        ...up,
+        last_updated: now,
+        updated_by: updatedBy
+      });
+
+      res.json({ message: 'Building base rates updated' });
+    } catch (err) {
+      console.error('PUT /buildings/:id/base-rates error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
 
 /**
  * DELETE /buildings/:id

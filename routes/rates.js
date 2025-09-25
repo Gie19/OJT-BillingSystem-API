@@ -18,12 +18,13 @@ const Rate = require('../models/Rate');
 // All routes require login
 router.use(authenticateToken);
 
-/** helper: limit editable fields to biller’s allowed utilities */
+/** helper: limit editable fields to biller’s allowed utilities (Rate-level only) */
 function filterRateFieldsByUtility(reqBody, userUtilities) {
+  // With the new model, Rate only exposes tenant-specific VAT/net fields
   const map = {
-    electric: ['erate_perKwH', 'e_vat', 'emin_con'],
-    water:    ['wrate_perCbM', 'w_vat', 'wnet_vat', 'wmin_con'],
-    lpg:      ['lrate_perKg'],
+    electric: ['e_vat'],
+    water:    ['wnet_vat', 'w_vat'],
+    lpg:      [], // no rate-level fields for LPG after migration
   };
   const allowed = new Set();
   (userUtilities || []).forEach(u => (map[u] || []).forEach(f => allowed.add(f)));
@@ -51,7 +52,7 @@ router.get(
       if (!tenants.length) return res.json([]);
 
       const tIds = tenants.map(t => t.tenant_id);
-      const rates = await Rate.findAll({ where: { tenant_id: tIds } });
+      const rates = await Rate.findAll({ where: { tenant_id: { [Op.in]: tIds } } });
 
       // optional join-like response
       const tenantMap = Object.fromEntries(tenants.map(t => [t.tenant_id, t.tenant_name]));
@@ -113,7 +114,7 @@ router.put(
     try {
       const tenantId = req.params.tenant_id;
 
-      // Admin can touch any fields; biller limited by utility_role
+      // Admin can touch any rate fields; biller limited by utility_role
       const isAdmin = (req.user.user_level || '').toLowerCase() === 'admin';
       const userUtils = Array.isArray(req.user.utility_role)
         ? req.user.utility_role.map(s => String(s).toLowerCase())
@@ -167,7 +168,6 @@ router.put(
     }
   }
 );
-
 
 /** DELETE a tenant’s rate (admin | biller in-building) */
 router.delete(
