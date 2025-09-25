@@ -3,12 +3,21 @@
 module.exports = {
   async up(qi, Sequelize) {
     await qi.createTable('building_list', {
-      building_id: { type: Sequelize.STRING(30), allowNull: false, primaryKey: true },
-      building_name: { type: Sequelize.STRING(30), allowNull: false }, // matches model:contentReference[oaicite:8]{index=8}
-      last_updated: { type: Sequelize.DATE, allowNull: false },
-      updated_by: { type: Sequelize.STRING(30), allowNull: false },
+      building_id:   { type: Sequelize.STRING(30), allowNull: false, primaryKey: true },
+      building_name: { type: Sequelize.STRING(30), allowNull: false },
+
+      // NEW: building-level base rates
+      erate_perKwH:  { type: Sequelize.DECIMAL(10,2).UNSIGNED, allowNull: false, defaultValue: 0.00 },
+      emin_con:      { type: Sequelize.DECIMAL(10,2).UNSIGNED, allowNull: false, defaultValue: 0.00 },
+      wrate_perCbM:  { type: Sequelize.DECIMAL(10,2).UNSIGNED, allowNull: false, defaultValue: 0.00 },
+      wmin_con:      { type: Sequelize.DECIMAL(10,2).UNSIGNED, allowNull: false, defaultValue: 0.00 },
+      lrate_perKg:   { type: Sequelize.DECIMAL(10,2).UNSIGNED, allowNull: false, defaultValue: 0.00 },
+
+      last_updated:  { type: Sequelize.DATE, allowNull: false },
+      updated_by:    { type: Sequelize.STRING(30), allowNull: false },
     });
   },
+
   async down(qi) {
     await qi.dropTable('building_list');
   }
