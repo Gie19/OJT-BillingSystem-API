@@ -6,13 +6,10 @@ module.exports = {
       rate_id:       { type: Sequelize.STRING(30), allowNull: false, primaryKey: true },
       tenant_id:     { type: Sequelize.STRING(30), allowNull: false, unique: true }, // one row per tenant
 
-      // REMOVED (moved to building_list):
-      // erate_perKwH, emin_con, wrate_perCbM, wmin_con, lrate_perKg
-
-      // Tenant-specific items that remain:
-      e_vat:         { type: Sequelize.DECIMAL(10,2).UNSIGNED, allowNull: false, defaultValue: 0.00 },
-      wnet_vat:      { type: Sequelize.DECIMAL(10,2).UNSIGNED, allowNull: false, defaultValue: 0.00 },
-      w_vat:         { type: Sequelize.DECIMAL(10,2).UNSIGNED, allowNull: false, defaultValue: 0.00 },
+      // Tenant-specific items that remain (MSSQL-safe: removed .UNSIGNED)
+      e_vat:         { type: Sequelize.DECIMAL(10,2), allowNull: false, defaultValue: 0.00 },
+      wnet_vat:      { type: Sequelize.DECIMAL(10,2), allowNull: false, defaultValue: 0.00 },
+      w_vat:         { type: Sequelize.DECIMAL(10,2), allowNull: false, defaultValue: 0.00 },
 
       last_updated:  { type: Sequelize.DATE, allowNull: false },
       updated_by:    { type: Sequelize.STRING(30), allowNull: false },

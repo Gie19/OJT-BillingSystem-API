@@ -5,8 +5,8 @@ module.exports = {
     await qi.createTable('stall_list', {
       stall_id:     { type: Sequelize.STRING(30), allowNull: false, primaryKey: true },
       stall_sn:     { type: Sequelize.STRING(30), allowNull: false, unique: true },
-      tenant_id:    { type: Sequelize.STRING(30), allowNull: true },  // nullable FK:contentReference[oaicite:10]{index=10}
-      building_id:  { type: Sequelize.STRING(30), allowNull: false }, // required FK:contentReference[oaicite:11]{index=11}
+      tenant_id:    { type: Sequelize.STRING(30), allowNull: true },
+      building_id:  { type: Sequelize.STRING(30), allowNull: false },
       stall_status: {
         type: Sequelize.ENUM('occupied','available','under maintenance'),
         allowNull: false,

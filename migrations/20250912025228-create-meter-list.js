@@ -4,9 +4,9 @@ module.exports = {
   async up(qi, Sequelize) {
     await qi.createTable('meter_list', {
       meter_id:     { type: Sequelize.STRING(30), allowNull: false, primaryKey: true },
-      meter_type:   { type: Sequelize.ENUM('electric','water','lpg'), allowNull: false }, //:contentReference[oaicite:12]{index=12}
+      meter_type:   { type: Sequelize.ENUM('electric','water','lpg'), allowNull: false },
       meter_sn:     { type: Sequelize.STRING(30), allowNull: false, unique: true },
-      meter_mult:   { type: Sequelize.DECIMAL(10,2).UNSIGNED, allowNull: false },
+      meter_mult:   { type: Sequelize.DECIMAL(10,2), allowNull: false }, // removed .UNSIGNED
       meter_status: {
         type: Sequelize.ENUM('active','inactive'),
         allowNull: false,

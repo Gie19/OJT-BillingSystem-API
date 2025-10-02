@@ -6,9 +6,9 @@ module.exports = {
       user_id:       { type: Sequelize.STRING(30), allowNull: false, primaryKey: true },
       user_password: { type: Sequelize.STRING(255), allowNull: false },
       user_fullname: { type: Sequelize.STRING(50), allowNull: false },
-      user_level:    { type: Sequelize.ENUM('admin','operator','biller'), allowNull: false }, // matches model:contentReference[oaicite:16]{index=16}
-      building_id:   { type: Sequelize.STRING(30), allowNull: true, defaultValue: null },     // admin may be null:contentReference[oaicite:17]{index=17}
-      utility_role:  { type: Sequelize.JSON, allowNull: true, defaultValue: null },           // only biller uses:contentReference[oaicite:18]{index=18}
+      user_level:    { type: Sequelize.ENUM('admin','operator','biller'), allowNull: false },
+      building_id:   { type: Sequelize.STRING(30), allowNull: true, defaultValue: null },
+      utility_role:  { type: Sequelize.JSON, allowNull: true, defaultValue: null },
     });
 
     await qi.addIndex('user_accounts', ['building_id'], { name: 'user_building_id_idx' });
