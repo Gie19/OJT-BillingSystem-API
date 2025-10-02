@@ -1,3 +1,4 @@
+// models/Meter.js
 const { DataTypes } = require('sequelize');
 const sequelize = require('./index');
 
@@ -16,8 +17,10 @@ const Meter = sequelize.define('Meter', {
     unique: true
   },
   meter_mult: {
-    type: DataTypes.DECIMAL(10, 2).UNSIGNED,
-    allowNull: false
+    // MSSQL-safe: removed .UNSIGNED, add min: 0 validation
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: false,
+    validate: { min: 0 }
   },
   meter_status: {
     type: DataTypes.ENUM('active', 'inactive'),

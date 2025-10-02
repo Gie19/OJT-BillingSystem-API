@@ -1,3 +1,4 @@
+// models/User.js
 const { DataTypes } = require('sequelize');
 const sequelize = require('./index');
 
@@ -6,17 +7,30 @@ const User = sequelize.define('User', {
     type: DataTypes.STRING,
     primaryKey: true
   },
-  user_password: DataTypes.STRING,
-  user_fullname: DataTypes.STRING,
-  // Updated roles: admin | operator | biller
-  user_level: DataTypes.ENUM('admin', 'operator', 'biller'),
+  user_password: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  user_fullname: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+
+  // ENUM -> becomes a CHECK constraint on MSSQL
+  // Roles: admin | operator | biller
+  user_level: {
+    type: DataTypes.ENUM('admin', 'operator', 'biller'),
+    allowNull: false
+  },
+
   // Admins may have null building_id
   building_id: {
     type: DataTypes.STRING,
     allowNull: true,
     defaultValue: null
   },
-  // Only billers use this now; operators ignore it
+
+  // Stored as NVARCHAR(MAX) on MSSQL; Sequelize (de)serializes JSON
   utility_role: {
     type: DataTypes.JSON,
     allowNull: true,
@@ -24,7 +38,7 @@ const User = sequelize.define('User', {
   }
 }, {
   tableName: 'user_accounts',
-  timestamps: false,
+  timestamps: false
 });
 
 module.exports = User;

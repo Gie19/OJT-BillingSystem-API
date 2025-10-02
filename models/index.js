@@ -1,4 +1,4 @@
-// models/index.js (or wherever you init Sequelize)
+// models/index.js
 require('dotenv').config();
 const { Sequelize } = require('sequelize');
 
@@ -8,22 +8,20 @@ const sequelize = new Sequelize(
   process.env.DB_PASSWORD,
   {
     host: process.env.DB_HOST,
-    port: process.env.DB_PORT,
-    dialect: 'mysql',
-    logging: true,            // set false to quiet SQL logs
+    port: process.env.DB_PORT || 1433,
+    dialect: 'mssql',
+    logging: true,
 
-    // >>> Timezone & date handling <<<
-    timezone: '+08:00',       // write dates as Asia/Manila
+    // MSSQL (tedious) options:
     dialectOptions: {
-      dateStrings: true,      // return DATE/DATETIME as strings
-      typeCast: (field, next) => {
-        // keep DATETIME/TIMESTAMP as raw strings (no TZ conversion on read)
-        if (field.type === 'DATETIME' || field.type === 'TIMESTAMP') {
-          return field.string();
-        }
-        return next();
-      },
+      options: {
+        encrypt: true,               // required on Azure; fine to keep on generally
+        trustServerCertificate: true // okay for local/dev; turn off in prod with a proper cert
+      }
     },
+    // NOTE:
+    // - Remove any MySQL-only options you may have had (timezone, dateStrings, typeCast).
+    // - Pool settings are optional; defaults are fine to start with.
   }
 );
 
