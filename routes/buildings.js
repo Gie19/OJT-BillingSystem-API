@@ -12,30 +12,95 @@ const { authorizeBuildingParam } = require('../middleware/authorizeBuilding');
 const { Op } = require('sequelize');
 
 // Models
-const User = require('../models/User');
-const Tenant = require('../models/Tenant');
-const Stall = require('../models/Stall');
-const Meter = require('../models/Meter');
 const Building = require('../models/Building');
 
 // All routes below require a valid token
 router.use(authenticateToken);
 
-/** Helper: filter which base-rate fields a biller may edit */
-function filterBuildingBaseRatesByUtility(reqBody, userUtilities) {
+// --- helpers --------------------------------------------------
+
+const NUM_FIELDS = ['erate_perKwH', 'emin_con', 'wrate_perCbM', 'wmin_con', 'lrate_perKg'];
+
+// map common variations -> canonical keys
+const KEY_MAP = new Map([
+  // electric rate + min
+  ['erate_perkwh', 'erate_perKwH'],
+  ['e_rate_per_kwh', 'erate_perKwH'],
+  ['emin_con', 'emin_con'],
+  ['e_min_con', 'emin_con'],
+
+  // water rate + min
+  ['wrate_percbm', 'wrate_perCbM'],
+  ['w_rate_per_cbm', 'wrate_perCbM'],
+  ['wmin_con', 'wmin_con'],
+  ['w_min_con', 'wmin_con'],
+
+  // lpg
+  ['lrate_perkg', 'lrate_perKg'],
+  ['l_rate_per_kg', 'lrate_perKg'],
+]);
+
+// normalize an object’s keys to canonical model field names
+function normalizeRateKeys(obj = {}) {
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    const nk = KEY_MAP.get(k.toLowerCase().replace(/\s+/g, '').replace(/__/g, '_')) || k;
+    out[nk] = v;
+  }
+  return out;
+}
+
+// coerce numeric fields, return {ok, data|error}
+function coerceRateNumbers(candidate) {
+  const updates = {};
+  for (const [k, v] of Object.entries(candidate)) {
+    if (NUM_FIELDS.includes(k)) {
+      if (v === '' || v == null) {
+        return { ok: false, error: `Field ${k} is required and must be a number` };
+      }
+      const num = Number(v);
+      if (!Number.isFinite(num)) {
+        return { ok: false, error: `Field ${k} must be a valid number` };
+      }
+      updates[k] = Math.round(num * 100) / 100; // match DECIMAL(10,2)
+    } else {
+      updates[k] = v;
+    }
+  }
+  return { ok: true, data: updates };
+}
+
+// filter which base-rate fields a biller may edit
+function filterByUtilities(reqBody, utilities) {
   const map = {
     electric: ['erate_perKwH', 'emin_con'],
-    water:    ['wrate_perCbM', 'wmin_con'],
-    lpg:      ['lrate_perKg'],
+    water: ['wrate_perCbM', 'wmin_con'],
+    lpg: ['lrate_perKg'],
   };
   const allowed = new Set();
-  (userUtilities || []).forEach(u => (map[u] || []).forEach(f => allowed.add(f)));
+  (utilities || []).forEach(u => (map[u] || []).forEach(f => allowed.add(f)));
   const out = {};
   for (const [k, v] of Object.entries(reqBody || {})) {
     if (allowed.has(k)) out[k] = v;
   }
   return out;
 }
+
+function normalizeUtilityRole(uraw) {
+  if (Array.isArray(uraw)) return uraw;
+  if (uraw == null) return [];
+  if (typeof uraw === 'string') {
+    try {
+      const parsed = JSON.parse(uraw);
+      return Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
+    } catch {
+      return uraw.trim() ? [uraw.trim()] : [];
+    }
+  }
+  return [uraw];
+}
+
+// --- routes ---------------------------------------------------
 
 /** GET all buildings (admin only) */
 router.get('/', authorizeRole('admin'), async (req, res) => {
@@ -62,16 +127,15 @@ router.get('/:building_id',
   }
 );
 
-/** CREATE building (admin) */
+/** CREATE building (admin) — NOW accepts optional rate fields */
 router.post('/', authorizeRole('admin'), async (req, res) => {
-  const { building_name } = req.body;
-
+  const { building_name, ...rest } = req.body || {};
   if (!building_name) {
     return res.status(400).json({ error: 'building_name is required' });
   }
 
   try {
-    // Get next BLDG- ID (cross-dialect; MSSQL-safe)
+    // next BLDG- id
     const rows = await Building.findAll({
       where: { building_id: { [Op.like]: 'BLDG-%' } },
       attributes: ['building_id'],
@@ -83,13 +147,21 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
     }, 0);
     const newBuildingId = `BLDG-${maxNum + 1}`;
 
+    // normalize incoming keys and coerce numbers
+    const normalized = normalizeRateKeys(rest);
+    const picked = {};
+    for (const f of NUM_FIELDS) if (normalized[f] !== undefined) picked[f] = normalized[f];
+    const coerced = coerceRateNumbers(picked);
+    if (!coerced.ok) return res.status(400).json({ error: coerced.error });
+
     const now = getCurrentDateTime();
     const created = await Building.create({
       building_id: newBuildingId,
       building_name,
-      erate_perKwH: 0.00, emin_con: 0.00,
-      wrate_perCbM: 0.00, wmin_con: 0.00,
-      lrate_perKg:  0.00,
+      // defaults
+      erate_perKwH: 0.00, emin_con: 0.00, wrate_perCbM: 0.00, wmin_con: 0.00, lrate_perKg: 0.00,
+      // override with provided values (if any)
+      ...coerced.data,
       last_updated: now,
       updated_by: req.user?.user_fullname || 'system'
     });
@@ -103,24 +175,35 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
 router.put('/:building_id/rates',
   authorizeRole('admin', 'biller'),
   authorizeBuildingParam(),
-  authorizeUtilityRole(), // biller must have utility_role matching submitted fields
+  authorizeUtilityRole(),
   async (req, res) => {
     try {
       const building = await Building.findByPk(req.params.building_id);
       if (!building) return res.status(404).json({ error: 'Building not found' });
 
-      let updates = {};
+      // normalize keys and limit to numeric fields only
+      const normalized = normalizeRateKeys(req.body || {});
+      let candidate = {};
+      for (const f of NUM_FIELDS) if (normalized[f] !== undefined) candidate[f] = normalized[f];
+
+      // biller scoping
       if (req.user.user_level === 'biller') {
-        updates = filterBuildingBaseRatesByUtility(req.body, req.user.utility_role || []);
-        if (Object.keys(updates).length === 0) {
+        const allowed = filterByUtilities(candidate, normalizeUtilityRole(req.user.utility_role));
+        if (Object.keys(allowed).length === 0) {
           return res.status(403).json({ error: 'No allowed rate fields to update for your utilities' });
         }
-      } else {
-        updates = req.body || {};
+        candidate = allowed;
       }
 
-      updates.last_updated = getCurrentDateTime();
-      updates.updated_by = req.user?.user_fullname || 'system';
+      // coerce numbers
+      const coerced = coerceRateNumbers(candidate);
+      if (!coerced.ok) return res.status(400).json({ error: coerced.error });
+
+      const updates = {
+        ...coerced.data,
+        last_updated: getCurrentDateTime(),
+        updated_by: req.user?.user_fullname || 'system'
+      };
 
       await building.update(updates);
       res.json(building);
