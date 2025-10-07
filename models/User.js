@@ -17,7 +17,6 @@ const User = sequelize.define('User', {
   },
 
   // ENUM -> becomes a CHECK constraint on MSSQL
-  // Roles: admin | operator | biller
   user_level: {
     type: DataTypes.ENUM('admin', 'operator', 'biller'),
     allowNull: false
@@ -30,11 +29,23 @@ const User = sequelize.define('User', {
     defaultValue: null
   },
 
-  // Stored as NVARCHAR(MAX) on MSSQL; Sequelize (de)serializes JSON
+  // Store small JSON as a string; (de)serialize here
   utility_role: {
-    type: DataTypes.JSON,
+    type: DataTypes.STRING(1000),
     allowNull: true,
-    defaultValue: null
+    defaultValue: null,
+    get() {
+      const raw = this.getDataValue('utility_role');
+      if (raw == null) return null;
+      try { return JSON.parse(raw); } catch { return raw; }
+    },
+    set(value) {
+      if (value == null) {
+        this.setDataValue('utility_role', null);
+      } else {
+        this.setDataValue('utility_role', JSON.stringify(value));
+      }
+    }
   }
 }, {
   tableName: 'user_accounts',

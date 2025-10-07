@@ -21,7 +21,7 @@ var billingsRouter = require('./routes/billings');
 // Sequelize setup
 const sequelize = require('./models');
 sequelize.authenticate()
-  .then(() => console.log('Sequelize connected to MySQL!'))
+  .then(() => console.log('Sequelize connected to MSSQL!'))
   .catch(err => console.error('Unable to connect to DB via Sequelize:', err));
 
 var app = express();
