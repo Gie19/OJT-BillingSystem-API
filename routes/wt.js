@@ -70,19 +70,32 @@ router.get('/:wt_id', authorizeRole('admin', 'biller'), async (req, res) => {
 /** POST /wt — create a WT code (admin & biller) */
 router.post('/', authorizeRole('admin', 'biller'), async (req, res) => {
   try {
-    const { wt_id, wt_code, wt_description, e_wt, w_wt, l_wt } = req.body || {};
-    if (!wt_id || !wt_code) {
-      return res.status(400).json({ error: 'wt_id and wt_code are required' });
+    const { wt_code, wt_description, e_wt, w_wt, l_wt } = req.body || {};
+    if (!wt_code) {
+      return res.status(400).json({ error: 'wt_code is required' });
     }
 
+    // coerce numbers (percent points)
     const coerced = coerceWtNumbers({ e_wt, w_wt, l_wt });
     if (!coerced.ok) return res.status(400).json({ error: coerced.error });
+
+    // Generate next WT-<n> (cross-dialect; MSSQL-safe)
+    const rows = await WT.findAll({
+      where: { wt_id: { [Op.like]: 'WT-%' } },
+      attributes: ['wt_id'],
+      raw: true
+    });
+    const maxNum = rows.reduce((max, r) => {
+      const m = String(r.wt_id).match(/^WT-(\d+)$/);
+      return m ? Math.max(max, Number(m[1])) : max;
+    }, 0);
+    const newWtId = `WT-${maxNum + 1}`;
 
     const now = getCurrentDateTime();
     const updatedBy = req.user?.user_fullname || 'System Admin';
 
     const created = await WT.create({
-      wt_id,
+      wt_id: newWtId,
       wt_code,
       wt_description: wt_description ?? 'Insert Description',
       ...coerced.data,
@@ -99,6 +112,7 @@ router.post('/', authorizeRole('admin', 'biller'), async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
 
 /** PUT /wt/:wt_id — update a WT code (admin & biller) */
 router.put('/:wt_id', authorizeRole('admin', 'biller'), async (req, res) => {

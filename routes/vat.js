@@ -72,19 +72,32 @@ router.get('/:tax_id', authorizeRole('admin', 'biller'), async (req, res) => {
 /** POST /vat — create a VAT code (admin & biller) */
 router.post('/', authorizeRole('admin', 'biller'), async (req, res) => {
   try {
-    const { tax_id, vat_code, vat_description, e_vat, w_vat, l_vat } = req.body || {};
-    if (!tax_id || !vat_code) {
-      return res.status(400).json({ error: 'tax_id and vat_code are required' });
+    const { vat_code, vat_description, e_vat, w_vat, l_vat } = req.body || {};
+    if (!vat_code) {
+      return res.status(400).json({ error: 'vat_code is required' });
     }
 
+    // coerce numbers (percent points)
     const coerced = coerceVatNumbers({ e_vat, w_vat, l_vat });
     if (!coerced.ok) return res.status(400).json({ error: coerced.error });
+
+    // Generate next VAT-<n> (cross-dialect; MSSQL-safe)
+    const rows = await VAT.findAll({
+      where: { tax_id: { [Op.like]: 'VAT-%' } },
+      attributes: ['tax_id'],
+      raw: true
+    });
+    const maxNum = rows.reduce((max, r) => {
+      const m = String(r.tax_id).match(/^VAT-(\d+)$/);
+      return m ? Math.max(max, Number(m[1])) : max;
+    }, 0);
+    const newTaxId = `VAT-${maxNum + 1}`;
 
     const now = getCurrentDateTime();
     const updatedBy = req.user?.user_fullname || 'System Admin';
 
     const created = await VAT.create({
-      tax_id,
+      tax_id: newTaxId,
       vat_code,
       vat_description: vat_description ?? 'Zero Rated',
       ...coerced.data,
@@ -101,6 +114,7 @@ router.post('/', authorizeRole('admin', 'biller'), async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
 
 /** PUT /vat/:tax_id — update a VAT code (admin & biller) */
 router.put('/:tax_id', authorizeRole('admin', 'biller'), async (req, res) => {
