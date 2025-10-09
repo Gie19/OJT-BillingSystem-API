@@ -13,7 +13,8 @@ var tenantsRouter = require('./routes/tenants');
 var stallsRouter = require('./routes/stalls');
 var meterRouter = require('./routes/meters');
 var readingsRouter = require('./routes/readings');
-var ratesRouter = require('./routes/rates');
+var vatsRouter = require('./routes/vat');
+var wtsRouter = require('./routes/wt');
 var buildingsRouter = require('./routes/buildings');
 var billingsRouter = require('./routes/billings');
 
@@ -40,7 +41,8 @@ app.use('/tenants', tenantsRouter);
 app.use('/stalls', stallsRouter);
 app.use('/meters', meterRouter);
 app.use('/readings', readingsRouter);
-app.use('/rates', ratesRouter);
+app.use('/vat', vatsRouter);
+app.use('/wt', wtsRouter);
 app.use('/buildings', buildingsRouter);
 app.use('/billings', billingsRouter);
 
