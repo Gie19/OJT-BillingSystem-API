@@ -4,7 +4,7 @@ const { Op } = require('sequelize');
 const Reading  = require('../models/Reading');
 const Meter    = require('../models/Meter');
 const Stall    = require('../models/Stall');
-const Rate     = require('../models/Rate');       // e_vat, w_vat, wnet_vat only
+// const Rate     = require('../models/Rate');       // e_vat, w_vat, wnet_vat only
 const Building = require('../models/Building');   // erate_perKwH, emin_con, wrate_perCbM, wmin_con, lrate_perKg
 
 // ------------------------------------------------------
