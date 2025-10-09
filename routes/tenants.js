@@ -74,9 +74,9 @@ router.post('/', authorizeRole('admin', 'biller'), async (req, res) => {
       tenant_name,
       building_id,
       tenant_status,
-      vat_code,       // NEW
-      wt_code,        // NEW
-      for_penalty     // NEW
+      vat_code,       
+      wt_code,        
+      for_penalty     
     } = req.body || {};
 
     const validVatCode = await validateVatCodeOrNull(vat_code);
