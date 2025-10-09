@@ -19,9 +19,20 @@ const Tenant = sequelize.define('Tenant', {
     type: DataTypes.STRING,
     allowNull: false,
   },
-  bill_start: {
-    type: DataTypes.DATEONLY, // DATE in SQL
+  vat_code: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    defaultValue: null,
+  },
+  wt_code: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    defaultValue: null,
+  },
+  for_penalty: {
+    type: DataTypes.BOOLEAN,
     allowNull: false,
+    defaultValue: false,
   },
   tenant_status: {
     type: DataTypes.ENUM('active', 'inactive'),
