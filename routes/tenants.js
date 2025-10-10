@@ -1,147 +1,297 @@
 // routes/tenants.js
 const express = require('express');
 const router = express.Router();
-const { Op } = require('sequelize');
 
+// Utilities & middleware
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole = require('../middleware/authorizeRole');
-const { authorizeBuildingParam, enforceRecordBuilding } = require('../middleware/authorizeBuilding');
+const {
+  authorizeBuildingParam,
+  attachBuildingScope,
+  enforceRecordBuilding
+} = require('../middleware/authorizeBuilding');
 
+// Sequelize
+const { Op } = require('sequelize');
+
+// Models
+const sequelize = require('../models');           // your initialized sequelize instance
 const Tenant = require('../models/Tenant');
-const VAT = require('../models/VAT');
-const WT = require('../models/WT');
+const Building = require('../models/Building');   // only used for existence checks (optional)
 
-// All routes require login
-router.use(authenticateToken);
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
 
-// Helper to validate vat_code and wt_code
-async function validateVatCodeOrNull(vat_code) {
-  if (vat_code == null || vat_code === '') return null;
-  const v = await VAT.findOne({ where: { vat_code: String(vat_code) }, attributes: ['vat_code'], raw: true });
-  if (!v) throw new Error('Invalid vat_code: not found in vat_codes');
-  return v.vat_code;
+/**
+ * Generates the next tenant_id in the form: TNT-<n>
+ * If you want zero-padding (e.g., TNT-0001), just replace the return with padStart.
+ */
+async function generateNextTenantId(t) {
+  // Lock the table range we care about to avoid race conditions (dialect permitting)
+  const rows = await Tenant.findAll({
+    attributes: ['tenant_id'],
+    where: { tenant_id: { [Op.like]: 'TNT-%' } },
+    transaction: t,
+    lock: t?.LOCK && t.LOCK.UPDATE, // works on postgres/mysql/mssql
+    raw: true,
+  });
+
+  let maxNum = 0;
+  for (const r of rows) {
+    const m = String(r.tenant_id).match(/^TNT-(\d+)$/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (!Number.isNaN(n) && n > maxNum) maxNum = n;
+    }
+  }
+  // Return next value
+  // To enable zero-padding: return `TNT-${String(maxNum + 1).padStart(4, '0')}`;
+  return `TNT-${maxNum + 1}`;
 }
 
-async function validateWtCodeOrNull(wt_code) {
-  if (wt_code == null || wt_code === '') return null;
-  const w = await WT.findOne({ where: { wt_code: String(wt_code) }, attributes: ['wt_code'], raw: true });
-  if (!w) throw new Error('Invalid wt_code: not found in wt_codes');
-  return w.wt_code;
+/** Coerce boolean-ish payloads (e.g., 'true'/'false') */
+function toBool(v, fallback = false) {
+  if (typeof v === 'boolean') return v;
+  if (v === null || v === undefined) return fallback;
+  const s = String(v).trim().toLowerCase();
+  if (['true', '1', 'yes', 'y'].includes(s)) return true;
+  if (['false', '0', 'no', 'n'].includes(s)) return false;
+  return fallback;
 }
 
-/** GET /tenants — list tenants with optional filters for penalty */
-router.get('/', async (req, res) => {
-  try {
-    const where = {};
+// -----------------------------------------------------------------------------
+// Routes
+// -----------------------------------------------------------------------------
 
-    // Filter by for_penalty if provided
-    const qPenalty = (req.query.for_penalty || '').toString().toLowerCase();
-    if (qPenalty) {
-      if (!['true', 'false'].includes(qPenalty)) {
-        return res.status(400).json({ error: "Invalid for_penalty. Use 'true' or 'false'." });
+/**
+ * GET /tenants
+ * - admin: can see all
+ * - operator/biller: scoped to their building_id (via attachBuildingScope)
+ * Supports query params:
+ *   q           - search in tenant_sn, tenant_name
+ *   status      - exact match (e.g., active/inactive)
+ *   building_id - admin only (overrides scope if provided)
+ */
+router.get(
+  '/',
+  authenticateToken,
+  authorizeRole('admin', 'operator', 'biller'),
+  attachBuildingScope(), // sets req.buildingWhere helper for non-admins
+  async (req, res) => {
+    try {
+      const { q, status, building_id } = req.query || {};
+
+      const where = {
+        ...req.buildingWhere?.(), // restrict when not admin
+      };
+
+      if (status) where.tenant_status = status;
+
+      // allow admin to filter by building explicitly
+      if (building_id && (req.user?.user_level || '').toLowerCase() === 'admin') {
+        where.building_id = building_id;
       }
-      where.for_penalty = qPenalty === 'true';
+
+      if (q) {
+        where[Op.or] = [
+          { tenant_sn: { [Op.like]: `%${q}%` } },
+          { tenant_name: { [Op.like]: `%${q}%` } },
+          { tenant_id: { [Op.like]: `%${q}%` } },
+        ];
+      }
+
+      const tenants = await Tenant.findAll({
+        where,
+        order: [['tenant_name', 'ASC']],
+      });
+
+      res.json(tenants);
+    } catch (err) {
+      console.error('Error in GET /tenants:', err);
+      res.status(500).json({ error: err.message });
     }
-
-    // Search filter for tenant_name or tenant_sn
-    const q = (req.query.q || '').toString().trim();
-    if (q) {
-      where[Op.or] = [
-        { tenant_name: { [Op.like]: `%${q}%` } },
-        { tenant_sn: { [Op.like]: `%${q}%` } },
-      ];
-    }
-
-    const tenants = await Tenant.findAll({
-      where,
-      include: [{ model: VAT, as: 'vat', attributes: ['vat_code', 'vat_description'] }, 
-                { model: WT, as: 'wt', attributes: ['wt_code', 'wt_description'] }],
-    });
-
-    res.json(tenants);
-  } catch (err) {
-    console.error('GET /tenants error:', err);
-    res.status(500).json({ error: 'Server error' });
   }
-});
+);
 
-/** POST /tenants — create a new tenant */
-router.post('/', authorizeRole('admin', 'biller'), async (req, res) => {
-  try {
+/**
+ * GET /tenants/:id
+ * - admin: full access
+ * - operator/biller: only if tenant.building_id === req.user.building_id
+ */
+router.get(
+  '/:id',
+  authenticateToken,
+  authorizeRole('admin', 'operator', 'biller'),
+  enforceRecordBuilding(async (req) => {
+    const rec = await Tenant.findOne({ where: { tenant_id: req.params.id } });
+    return rec?.building_id;
+  }),
+  async (req, res) => {
+    try {
+      const tenant = await Tenant.findOne({ where: { tenant_id: req.params.id } });
+      if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+      res.json(tenant);
+    } catch (err) {
+      console.error('Error in GET /tenants/:id:', err);
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+/**
+ * POST /tenants
+ * Creates a tenant with auto-generated tenant_id as TNT-<n>.
+ * - admin, biller can create (adjust roles as you need)
+ * Body:
+ *   tenant_sn, tenant_name, building_id, tenant_status, vat_code, wt_code, for_penalty
+ */
+router.post(
+  '/',
+  authenticateToken,
+  authorizeRole('admin', 'biller'),
+  authorizeBuildingParam('body', 'building_id'), // non-admin must match their building
+  async (req, res) => {
     const {
       tenant_sn,
       tenant_name,
       building_id,
-      tenant_status,
-      vat_code,       
-      wt_code,        
-      for_penalty     
+      tenant_status = 'active',
+      vat_code = null,
+      wt_code = null,
+      for_penalty = false,
     } = req.body || {};
 
-    const validVatCode = await validateVatCodeOrNull(vat_code);
-    const validWtCode = await validateWtCodeOrNull(wt_code);
-    const penaltyFlag = (typeof for_penalty === 'boolean') ? for_penalty : (String(for_penalty).toLowerCase() === 'true');
+    if (!tenant_name) {
+      return res.status(400).json({ error: 'tenant_name is required' });
+    }
+    if (!building_id) {
+      return res.status(400).json({ error: 'building_id is required' });
+    }
 
-    const newTenantId = `TENANT-${Date.now()}`;  // Replace with your own ID logic
+    try {
+      // Optional: verify building exists
+      const b = await Building.findOne({ where: { building_id } });
+      if (!b) return res.status(404).json({ error: 'Building not found' });
 
-    const created = await Tenant.create({
-      tenant_id: newTenantId,
-      tenant_sn,
-      tenant_name,
-      building_id,
-      tenant_status: tenant_status || 'active',
-      vat_code: validVatCode,
-      wt_code: validWtCode,
-      for_penalty: penaltyFlag,
-      last_updated: getCurrentDateTime(),
-      updated_by: req.user?.user_fullname || 'System Admin',
-    });
+      const result = await sequelize.transaction(async (t) => {
+        const newTenantId = await generateNextTenantId(t);
 
-    res.status(201).json({ message: 'Tenant created successfully', tenantId: newTenantId });
-  } catch (err) {
-    console.error('POST /tenants error:', err);
-    res.status(500).json({ error: 'Server error' });
+        const created = await Tenant.create(
+          {
+            tenant_id: newTenantId,                // <-- TNT-#
+            tenant_sn: tenant_sn || null,
+            tenant_name,
+            building_id,
+            tenant_status,
+            vat_code,
+            wt_code,
+            for_penalty: toBool(for_penalty, false),
+            last_updated: getCurrentDateTime(),
+            updated_by: req.user?.user_fullname || 'System Admin',
+          },
+          { transaction: t }
+        );
+
+        return created;
+      });
+
+      res.status(201).json({
+        message: 'Tenant created successfully',
+        tenant: result,
+      });
+    } catch (err) {
+      console.error('Error in POST /tenants:', err);
+      if (err?.name === 'SequelizeUniqueConstraintError') {
+        return res.status(409).json({ error: 'Duplicate tenant_sn or tenant_id' });
+      }
+      res.status(500).json({ error: err.message });
+    }
   }
-});
+);
 
-/** PUT /tenants/:tenant_id — update an existing tenant */
-router.put('/:tenant_id', authorizeRole('admin', 'biller'), async (req, res) => {
-  try {
-    const tenant = await Tenant.findByPk(req.params.tenant_id);
-    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+/**
+ * PUT /tenants/:id
+ * - admin: full access
+ * - operator/biller: only within their building
+ * (Does not change tenant_id)
+ */
+router.put(
+  '/:id',
+  authenticateToken,
+  authorizeRole('admin', 'operator', 'biller'),
+  enforceRecordBuilding(async (req) => {
+    const rec = await Tenant.findOne({ where: { tenant_id: req.params.id } });
+    return rec?.building_id;
+  }),
+  async (req, res) => {
+    try {
+      const {
+        tenant_sn,
+        tenant_name,
+        tenant_status,
+        vat_code,
+        wt_code,
+        for_penalty,
+      } = req.body || {};
 
-    const {
-      tenant_sn,
-      tenant_name,
-      building_id,
-      tenant_status,
-      vat_code,       // NEW
-      wt_code,        // NEW
-      for_penalty     // NEW
-    } = req.body || {};
+      const tenant = await Tenant.findOne({ where: { tenant_id: req.params.id } });
+      if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
 
-    const validVatCode = vat_code ? await validateVatCodeOrNull(vat_code) : tenant.vat_code;
-    const validWtCode = wt_code ? await validateWtCodeOrNull(wt_code) : tenant.wt_code;
-    const penaltyFlag = (for_penalty === undefined) ? tenant.for_penalty : (String(for_penalty).toLowerCase() === 'true');
+      // If client tries to move tenant to another building, require admin + param guard
+      if (req.body?.building_id && req.body.building_id !== tenant.building_id) {
+        if ((req.user?.user_level || '').toLowerCase() !== 'admin') {
+          return res.status(403).json({ error: 'Changing building_id requires admin' });
+        }
+        // (Optional) verify new building exists
+        const b = await Building.findOne({ where: { building_id: req.body.building_id } });
+        if (!b) return res.status(404).json({ error: 'New building_id not found' });
+      }
 
-    await tenant.update({
-      tenant_sn: tenant_sn ?? tenant.tenant_sn,
-      tenant_name: tenant_name ?? tenant.tenant_name,
-      building_id: building_id ?? tenant.building_id,
-      tenant_status: tenant_status ?? tenant.tenant_status,
-      vat_code: validVatCode,
-      wt_code: validWtCode,
-      for_penalty: penaltyFlag,
-      last_updated: getCurrentDateTime(),
-      updated_by: req.user?.user_fullname || 'System Admin',
-    });
+      await tenant.update({
+        tenant_sn: tenant_sn ?? tenant.tenant_sn,
+        tenant_name: tenant_name ?? tenant.tenant_name,
+        tenant_status: tenant_status ?? tenant.tenant_status,
+        vat_code: vat_code ?? tenant.vat_code,
+        wt_code: wt_code ?? tenant.wt_code,
+        for_penalty: typeof for_penalty === 'undefined' ? tenant.for_penalty : toBool(for_penalty, tenant.for_penalty),
+        building_id: req.body?.building_id ?? tenant.building_id,
+        last_updated: getCurrentDateTime(),
+        updated_by: req.user?.user_fullname || 'System Admin',
+      });
 
-    res.json(tenant);
-  } catch (err) {
-    console.error('PUT /tenants/:tenant_id error:', err);
-    res.status(500).json({ error: err.message });
+      res.json({ message: 'Tenant updated successfully', tenant });
+    } catch (err) {
+      console.error('Error in PUT /tenants/:id:', err);
+      res.status(500).json({ error: err.message });
+    }
   }
-});
+);
+
+/**
+ * DELETE /tenants/:id
+ * - admin: full access
+ * - operator/biller: only if in their building
+ */
+router.delete(
+  '/:id',
+  authenticateToken,
+  authorizeRole('admin', 'operator', 'biller'),
+  enforceRecordBuilding(async (req) => {
+    const rec = await Tenant.findOne({ where: { tenant_id: req.params.id } });
+    return rec?.building_id;
+  }),
+  async (req, res) => {
+    try {
+      const deleted = await Tenant.destroy({ where: { tenant_id: req.params.id } });
+      if (deleted === 0) return res.status(404).json({ error: 'Tenant not found' });
+      res.json({ message: `Tenant ${req.params.id} deleted successfully` });
+    } catch (err) {
+      console.error('Error in DELETE /tenants/:id:', err);
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
 
 module.exports = router;
