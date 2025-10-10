@@ -1,409 +1,283 @@
+// utils/billingEngine.js
+'use strict';
+
 const { Op } = require('sequelize');
 
 // Models
-const Reading  = require('../models/Reading');
+const Reading  = require('../models/Reading');   // DATEONLY lastread_date
 const Meter    = require('../models/Meter');
 const Stall    = require('../models/Stall');
-// const Rate     = require('../models/Rate');       // e_vat, w_vat, wnet_vat only
-const Building = require('../models/Building');   // erate_perKwH, emin_con, wrate_perCbM, wmin_con, lrate_perKg
+const Tenant   = require('../models/Tenant');    // vat_code, wt_code, for_penalty
+const VAT      = require('../models/VAT');       // e_vat, w_vat, l_vat (percent or fraction)
+const WT       = require('../models/WT');        // e_wt, w_wt, l_wt (percent or fraction)
+const Building = require('../models/Building');  // erate_perKwH, emin_con, wrate_perCbM, wmin_con, lrate_perKg
 
-// ------------------------------------------------------
-// Config
-// ------------------------------------------------------
-const BOUNDARY_MODE = 'include_zero_edge'; // or 'exclude_zero_edge'
+/* =========================
+ * Small helpers (no DB)
+ * ========================= */
 
-// ------------------------------------------------------
-// Pure helpers (no DB)
-// ------------------------------------------------------
-const ymd = (d) => new Date(d).toISOString().slice(0, 10);
-
-function addMonthsUTC(dateStr, months) {
-  const d = new Date(dateStr + 'T00:00:00Z');
-  const y = d.getUTCFullYear();
-  const m = d.getUTCMonth();
-  const day = d.getUTCDate();
-  const next = new Date(Date.UTC(y, m + months, 1));
-  const lastDay = new Date(Date.UTC(next.getUTCFullYear(), next.getUTCMonth() + 1, 0)).getUTCDate();
-  next.setUTCDate(Math.min(day, lastDay));
-  return next;
-}
-function addDaysUTC(dateStr, days) {
-  const d = new Date(dateStr + 'T00:00:00Z');
-  d.setUTCDate(d.getUTCDate() + days);
-  return d;
-}
-function round(n, d) {
+function round(n, d = 2) {
   if (n === null || n === undefined) return null;
   return Number(Number(n).toFixed(d));
 }
-function dayAdd(dateStr, days) { return ymd(addDaysUTC(dateStr, days)); }
-function dayBefore(dateStr) { return dayAdd(dateStr, -1); }
-function dayAfter(dateStr)  { return dayAdd(dateStr, +1); }
 
+// Turn 12 → 0.12, 1 → 0.01, 0.12 → 0.12
+const normalizePct = (v) => {
+  const n = Number(v) || 0;
+  return n > 1 ? n / 100 : n;
+};
+
+// LPG minimum is fixed (per your instruction)
+const LPG_MIN_CON = 1;
+
+// YYYY-MM-DD from a UTC Date
+function ymd(d) {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+// Build string windows (DATEONLY-safe) for current and previous months
 function getCurrentPeriodFromEnd(endDateStr) {
-  const start = ymd(addDaysUTC(ymd(addMonthsUTC(endDateStr, -1)), +1));
-  const end   = ymd(endDateStr);
-  return { start, end };
-}
-function getPreviousPeriodFromCurrent(currentStartStr) {
-  const prevEnd   = ymd(addDaysUTC(currentStartStr, -1));
-  const prevStart = ymd(addDaysUTC(ymd(addMonthsUTC(prevEnd, -1)), +1));
-  return { prevStart, prevEnd };
+  const end = new Date(endDateStr + 'T00:00:00Z');
+  const startOfMonth = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
+  const nextMonthStart = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() + 1, 1));
+  const endOfMonth = new Date(nextMonthStart.getTime() - 24 * 60 * 60 * 1000);
+  return { start: ymd(startOfMonth), end: ymd(endOfMonth) };
 }
 
-// ------------------------------------------------------
-// DB helpers
-// ------------------------------------------------------
-async function getMaxReadingInPeriod(meterId, startDate, endDate) {
+function getPreviousPeriodFromCurrent(currStartStr) {
+  const s = new Date(currStartStr + 'T00:00:00Z'); // first day of current month
+  const prevStart = new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth() - 1, 1));
+  const prevEnd   = new Date(s.getTime() - 24 * 60 * 60 * 1000);
+  return { prevStart: ymd(prevStart), prevEnd: ymd(prevEnd) };
+}
+
+/* =========================
+ * DB helpers
+ * ========================= */
+
+// Latest reading (by date) in a DATEONLY window [start, end]
+async function getMaxReadingInPeriod(meter_id, startStr, endStr) {
   const row = await Reading.findOne({
     where: {
-      meter_id: meterId,
-      lastread_date: { [Op.between]: [startDate, endDate] },
+      meter_id,
+      lastread_date: { [Op.gte]: startStr, [Op.lte]: endStr },
     },
-    order: [
-      ['reading_value', 'DESC'],
-      ['lastread_date', 'DESC'],
-      ['reading_id', 'DESC'],
-    ],
-    attributes: ['reading_value', 'lastread_date'],
+    order: [['lastread_date', 'DESC']],
     raw: true,
   });
-  if (!row) return null;
-  return { value: Number(row.reading_value) || 0, date: row.lastread_date };
+  return row ? { value: Number(row.reading_value) || 0, date: row.lastread_date } : null;
 }
 
-async function getZeroRuns(meterId, start, end) {
-  const rows = await Reading.findAll({
-    where: {
-      meter_id: meterId,
-      lastread_date: { [Op.between]: [start, end] },
-      reading_value: 0
-    },
-    attributes: ['lastread_date'],
-    order: [['lastread_date', 'ASC']],
-    raw: true
-  });
-  if (!rows.length) return [];
+// Pull VAT/WT per tenant codes (returns FRACTIONS)
+async function getTenantTaxKnobs(tenant) {
+  const [vatRow, wtRow] = await Promise.all([
+    tenant?.vat_code ? VAT.findOne({ where: { vat_code: tenant.vat_code }, raw: true }) : null,
+    tenant?.wt_code  ? WT.findOne({ where: { wt_code:  tenant.wt_code  }, raw: true }) : null,
+  ]);
 
-  const runs = [];
-  let runStart = ymd(rows[0].lastread_date);
-  let prev     = runStart;
+  const vat = {
+    e: normalizePct(vatRow?.e_vat || 0),
+    w: normalizePct(vatRow?.w_vat || 0),
+    l: normalizePct(vatRow?.l_vat || 0),
+  };
+  const wt = {
+    e: normalizePct(wtRow?.e_wt || 0),
+    w: normalizePct(wtRow?.w_wt || 0),
+    l: normalizePct(wtRow?.l_wt || 0),
+  };
 
-  for (let i = 1; i < rows.length; i++) {
-    const d = ymd(rows[i].lastread_date);
-    if (d === dayAfter(prev)) {
-      prev = d;
-    } else {
-      runs.push({ start: runStart, end: prev }); // end == last zero day
-      runStart = d;
-      prev = d;
-    }
-  }
-  runs.push({ start: runStart, end: prev });
-  return runs;
+  return { vat, wt };
 }
 
-// ------------------------------------------------------
-// Charge engine (Building base rates + Rate VAT/net)
-// ------------------------------------------------------
-function computeChargesByType(mtype, mult, building, rate, prevIdx, currIdx) {
-  let consumption, base, vat, total;
+/* =========================
+ * Core math (Excel-style)
+ * ========================= */
 
-  if (mtype === 'lpg') {
-    const lrate = Number(building.lrate_perKg) || 0;
-    consumption = Number(currIdx) || 0; // LPG: reading is qty (kg)
-    base  = consumption * lrate;
-    vat   = 0;
-    total = base + vat;
-  } else if (mtype === 'electric') {
-    const emin  = Number(building.emin_con) || 0;
-    const erate = Number(building.erate_perKwH) || 0;
-    const eVat  = Number(rate.e_vat) || 0;
+function applyTaxes({ base, vatRate, wtRate, forPenalty, penaltyRate }) {
+  const b   = Number(base) || 0;
+  const vat = b * (Number(vatRate) || 0);      // base × VAT%
+  const wt  = vat * (Number(wtRate) || 0);     // VAT × WT%
+  const pen = forPenalty ? b * (Number(penaltyRate) || 0) : 0; // base × penalty% (only if flag true)
+  const total = b + vat + wt + pen;
+  return { vat: round(vat), wt: round(wt), penalty: round(pen), total: round(total) };
+}
 
-    consumption = (Number(currIdx) - Number(prevIdx)) * Number(mult || 1);
-    if (consumption <= 0) consumption = emin; // min per segment
-    base  = consumption * erate;
-    vat   = base * eVat;
-    total = base + vat;
-  } else if (mtype === 'water') {
-    const wmin  = Number(building.wmin_con) || 0;
-    const wrate = Number(building.wrate_perCbM) || 0;
-    const wnet  = Number(rate.wnet_vat);
-    const wVat  = Number(rate.w_vat) || 0;
-    if (!Number.isFinite(wnet) || wnet <= 0) throw new Error('Invalid water rate: wnet_vat must be > 0');
+// Unified for all utilities; LPG min is constant (1)
+function computeChargesByType(mtype, mult, building, taxKnobs, prevIdx, currIdx, forPenalty, penaltyRate) {
+  const t = String(mtype || '').toLowerCase();
+  const k = Number(mult) || 1;
+  const prev = Number(prevIdx) || 0;
+  const curr = Number(currIdx) || 0;
 
-    consumption = (Number(currIdx) - Number(prevIdx)) * Number(mult || 1);
-    if (consumption <= 0) consumption = wmin;
-    base  = (consumption * wrate) / wnet;
-    vat   = base * wVat;
-    total = base + vat;
+  const raw = (curr - prev) * k;
+
+  let min = 0, rate = 0, vatR = 0, wtR = 0;
+
+  if (t === 'electric') {
+    min  = Number(building.emin_con) || 0;
+    rate = Number(building.erate_perKwH) || 0;
+    vatR = taxKnobs.vat.e; wtR = taxKnobs.wt.e;
+  } else if (t === 'water') {
+    min  = Number(building.wmin_con) || 0;
+    rate = Number(building.wrate_perCbM) || 0;
+    vatR = taxKnobs.vat.w; wtR = taxKnobs.wt.w;
+  } else if (t === 'lpg') {
+    min  = LPG_MIN_CON; // fixed
+    rate = Number(building.lrate_perKg) || 0;
+    vatR = taxKnobs.vat.l; wtR = taxKnobs.wt.l;
   } else {
-    throw new Error(`Unsupported meter type: ${mtype}`);
+    throw new Error(`Unsupported meter type: ${t}`);
   }
+
+  const consumption = raw > 0 ? raw : min;
+  const base = consumption * rate;
+  const taxes = applyTaxes({ base, vatRate: vatR, wtRate: wtR, forPenalty, penaltyRate });
 
   return {
-    consumption: round(consumption, 2),
-    base: round(base, 2),
-    vat: round(vat, 2),
-    total: round(total, 2),
+    consumption: round(consumption),
+    base: round(base),
+    vat: taxes.vat,
+    wt: taxes.wt,
+    penalty: taxes.penalty,
+    total: taxes.total,
   };
 }
 
-// ------------------------------------------------------
-// Public API
-// ------------------------------------------------------
-async function computeBillingForMeter({ meterId, endDate, user }) {
-  // 1) Meter → Stall
+/* =========================
+ * Public API — Billing
+ * ========================= */
+
+/**
+ * Compute billing for a single meter for the month containing endDate.
+ * @param {Object} params
+ * @param {string} params.meterId
+ * @param {string} params.endDate     YYYY-MM-DD
+ * @param {Object} params.user        current user (for scope check)
+ * @param {number} params.penaltyRatePct  Penalty % as PERCENT (e.g., 2 = 2%)
+ */
+async function computeBillingForMeter({ meterId, endDate, user, penaltyRatePct = 0 }) {
+  // Meter → Stall
   const meter = await Meter.findOne({
     where: { meter_id: meterId },
-    attributes: ['meter_id', 'meter_type', 'meter_mult', 'stall_id'],
+    attributes: ['meter_id', 'meter_sn', 'meter_type', 'meter_mult', 'stall_id'],
     raw: true
   });
-  if (!meter) {
-    const err = new Error('Meter not found');
-    err.status = 404;
-    throw err;
-  }
+  if (!meter) { const e = new Error('Meter not found'); e.status = 404; throw e; }
 
   const stall = await Stall.findOne({
     where: { stall_id: meter.stall_id },
-    attributes: ['building_id', 'tenant_id'],
+    attributes: ['stall_id', 'building_id', 'tenant_id'],
     raw: true
   });
-  if (!stall) {
-    const err = new Error('Stall not found for this meter');
-    err.status = 404;
-    throw err;
-  }
+  if (!stall) { const e = new Error('Stall not found for this meter'); e.status = 404; throw e; }
 
-  // 2) Building scope for non-admins
+  // Scope check (non-admin must match building)
   const lvl = (user?.user_level || '').toLowerCase();
   if (lvl !== 'admin') {
-    const userBldg = user?.building_id;
-    if (!userBldg) {
-      const err = new Error('Unauthorized: No building assigned');
-      err.status = 401;
-      throw err;
-    }
-    if (stall.building_id !== userBldg) {
-      const err = new Error('No access: Meter not under your assigned building');
-      err.status = 403;
-      throw err;
-    }
+    if (!user?.building_id) { const e = new Error('Unauthorized: No building assigned'); e.status = 401; throw e; }
+    if (user.building_id !== stall.building_id) { const e = new Error('No access to this meter'); e.status = 403; throw e; }
   }
 
-  // 3) Rate + Building
-  if (!stall.tenant_id) {
-    const err = new Error('Stall has no tenant; no rate available.');
-    err.status = 400;
-    throw err;
-  }
-  const rate = await Rate.findOne({ where: { tenant_id: stall.tenant_id }, raw: true });
-  if (!rate) {
-    const err = new Error('No utility rate configured for this tenant.');
-    err.status = 400;
-    throw err;
-  }
-
+  // Building rates & mins
   const building = await Building.findOne({
     where: { building_id: stall.building_id },
     attributes: ['building_id','erate_perKwH','emin_con','wrate_perCbM','wmin_con','lrate_perKg'],
     raw: true
   });
-  if (!building) {
-    const err = new Error('Building configuration not found.');
-    err.status = 400;
-    throw err;
-  }
+  if (!building) { const e = new Error('Building configuration not found'); e.status = 400; throw e; }
 
-  // 4) Periods
+  // Tenant tax knobs and penalty flag
+  const tenant = await Tenant.findOne({
+    where: { tenant_id: stall.tenant_id },
+    attributes: ['tenant_id','tenant_name','vat_code','wt_code','for_penalty'],
+    raw: true
+  });
+  if (!tenant) { const e = new Error('Tenant not found'); e.status = 400; throw e; }
+
+  const taxKnobs   = await getTenantTaxKnobs(tenant);
+  const forPenalty = !!tenant.for_penalty;
+  const penaltyRate = forPenalty ? normalizePct(penaltyRatePct) : 0; // omit if false
+
+  // Current & previous month windows (DATEONLY strings)
   const { start: currStart, end: currEnd } = getCurrentPeriodFromEnd(endDate);
   const { prevStart, prevEnd }             = getPreviousPeriodFromCurrent(currStart);
 
-  // 5) Max indices within periods
-  const currMax = await getMaxReadingInPeriod(meterId, currStart, currEnd);
-  const prevMax = await getMaxReadingInPeriod(meterId, prevStart, prevEnd);
-  if (!currMax) {
-    const err = new Error(`No readings for ${currStart}..${currEnd}`);
-    err.status = 400;
-    throw err;
-  }
-  if (!prevMax) {
-    const err = new Error(`No readings for ${prevStart}..${prevEnd}`);
-    err.status = 400;
-    throw err;
-  }
+  // Pick last reading in each window (by date)
+  const [currMax, prevMax] = await Promise.all([
+    getMaxReadingInPeriod(meterId, currStart, currEnd),
+    getMaxReadingInPeriod(meterId, prevStart, prevEnd),
+  ]);
 
+  if (!currMax) { const e = new Error(`No readings for ${currStart}..${currEnd}`); e.status = 400; throw e; }
+  if (!prevMax) { const e = new Error(`No readings for ${prevStart}..${prevEnd}`); e.status = 400; throw e; }
+
+  // Single-segment (Excel style): prev → curr
   const mtype = String(meter.meter_type || '').toLowerCase();
   const mult  = Number(meter.meter_mult) || 1;
 
-  // 6) Downtime (zeros) in CURRENT period
-  const zeroRuns = await getZeroRuns(meterId, currStart, currEnd);
-
-  // 7) Build split segments for CURRENT
-  const segments = [];
-  let anchorIdx = Number(prevMax.value);
-  let pointer   = currStart;
-
-  for (const run of zeroRuns) {
-    // Billable BEFORE downtime
-    const preEnd = (BOUNDARY_MODE === 'include_zero_edge') ? run.start : dayBefore(run.start);
-    if (pointer <= preEnd) {
-      const segMax = await getMaxReadingInPeriod(meterId, pointer, preEnd);
-      if (segMax) {
-        const charges = computeChargesByType(mtype, mult, building, rate, anchorIdx, segMax.value);
-        segments.push({
-          type: 'billable',
-          start: pointer,
-          end: preEnd,
-          prev_index: round(anchorIdx, 2),
-          curr_index: round(Number(segMax.value) || 0, 2),
-          ...charges
-        });
-        anchorIdx = Number(segMax.value);
-      }
-    }
-
-    // Downtime segment
-    segments.push({ type: 'downtime', start: run.start, end: run.end, reason: 'zero readings' });
-
-    // Next billable start
-    pointer = (BOUNDARY_MODE === 'include_zero_edge') ? run.end : dayAfter(run.end);
-  }
-
-  // Trailing billable (after last downtime)
-  if (pointer <= currEnd) {
-    const segMax = await getMaxReadingInPeriod(meterId, pointer, currEnd);
-    if (segMax) {
-      const charges = computeChargesByType(mtype, mult, building, rate, anchorIdx, segMax.value);
-      segments.push({
-        type: 'billable',
-        start: pointer,
-        end: currEnd,
-        prev_index: round(anchorIdx, 2),
-        curr_index: round(Number(segMax.value) || 0, 2),
-        ...charges
-      });
-      anchorIdx = Number(segMax.value);
-    }
-  }
-
-  // Shape periods + totals
-  const periods = segments.map(s => ({
-    type: s.type,
-    start: s.start,
-    end: s.end,
-    ...(s.type === 'downtime' ? { reason: s.reason || 'zero readings' } : {}),
-    bill: {
-      prev_index: s.type === 'billable' ? (s.prev_index ?? null) : null,
-      curr_index: s.type === 'billable' ? (s.curr_index ?? null) : null,
-      consumption: s.type === 'billable' ? (s.consumption ?? 0) : 0,
-      base: s.type === 'billable' ? (s.base ?? 0) : 0,
-      vat: s.type === 'billable' ? (s.vat ?? 0) : 0,
-      total: s.type === 'billable' ? (s.total ?? 0) : 0
-    }
-  }));
-
-  const totals = periods.reduce((acc, p) => {
-    if (p.type !== 'billable') return acc;
-    acc.consumption += Number(p.bill.consumption) || 0;
-    acc.base        += Number(p.bill.base) || 0;
-    acc.vat         += Number(p.bill.vat) || 0;
-    acc.total       += Number(p.bill.total) || 0;
-    return acc;
-  }, { consumption: 0, base: 0, vat: 0, total: 0 });
-
-  // Previous period rollup (for rate-of-change on consumption)
-  const { prevStart: prePrevStart, prevEnd: prePrevEnd } = getPreviousPeriodFromCurrent(prevStart);
-  const prePrevMax = await getMaxReadingInPeriod(meterId, prePrevStart, prePrevEnd);
-
-  let previousConsumption = null;
-  if (prePrevMax && prevMax) {
-    const zeroRunsPrev = await getZeroRuns(meterId, prevStart, prevEnd);
-    const prevSegments = [];
-    let anchorPrevIdx = Number(prePrevMax.value);
-    let prevPtr       = prevStart;
-
-    for (const run of zeroRunsPrev) {
-      const preEnd2 = (BOUNDARY_MODE === 'include_zero_edge') ? run.start : dayBefore(run.start);
-      if (prevPtr <= preEnd2) {
-        const segMax = await getMaxReadingInPeriod(meterId, prevPtr, preEnd2);
-        if (segMax) {
-          const ch = computeChargesByType(mtype, mult, building, rate, anchorPrevIdx, segMax.value);
-          prevSegments.push({ type: 'billable', ...ch });
-          anchorPrevIdx = Number(segMax.value);
-        }
-      }
-      prevPtr = (BOUNDARY_MODE === 'include_zero_edge') ? run.end : dayAfter(run.end);
-    }
-
-    if (prevPtr <= prevEnd) {
-      const segMax = await getMaxReadingInPeriod(meterId, prevPtr, prevEnd);
-      if (segMax) {
-        const ch = computeChargesByType(mtype, mult, building, rate, anchorPrevIdx, segMax.value);
-        prevSegments.push({ type: 'billable', ...ch });
-        anchorPrevIdx = Number(segMax.value);
-      }
-    }
-
-    const prevTotals = prevSegments.reduce((acc, s) => {
-      acc.consumption += Number(s.consumption) || 0;
-      acc.base        += Number(s.base) || 0;
-      acc.vat         += Number(s.vat) || 0;
-      acc.total       += Number(s.total) || 0;
-      return acc;
-    }, { consumption: 0, base: 0, vat: 0, total: 0 });
-
-    previousConsumption = round(prevTotals.consumption, 2);
-  }
-
-  const currentConsumption = round(totals.consumption, 2);
-  let rateOfChange = null;
-  if ((previousConsumption || 0) > 0) {
-    rateOfChange = Math.ceil(((currentConsumption - previousConsumption) / previousConsumption) * 100);
-  }
+  const bill = computeChargesByType(
+    mtype, mult, building, taxKnobs, prevMax.value, currMax.value, forPenalty, penaltyRate
+  );
 
   return {
-    meter_id: meterId,
-    meter_type: mtype,
-    building_id: stall.building_id,
-    periods,
-    totals,
-    current_consumption: currentConsumption,
-    previous_consumption: previousConsumption,
-    rate_of_change: rateOfChange
+    meter: {
+      meter_id: meter.meter_id,
+      meter_sn: meter.meter_sn,
+      meter_type: mtype,
+      meter_mult: mult,
+    },
+    stall: {
+      stall_id: stall.stall_id,
+      building_id: stall.building_id,
+      tenant_id: stall.tenant_id,
+    },
+    tenant: {
+      tenant_id: tenant.tenant_id,
+      tenant_name: tenant.tenant_name,
+      vat_code: tenant.vat_code || null,
+      wt_code: tenant.wt_code || null,
+      for_penalty: forPenalty,
+    },
+    period: {
+      current: { start: currStart, end: currEnd },
+      previous: { start: prevStart, end: prevEnd }
+    },
+    indices: {
+      prev_index: round(prevMax.value, 2),
+      curr_index: round(currMax.value, 2),
+    },
+    billing: bill,
+    totals: {
+      consumption: bill.consumption,
+      base: bill.base,
+      vat: bill.vat,
+      wt: bill.wt,
+      penalty: bill.penalty,
+      total: bill.total,
+    }
   };
 }
 
-async function computeBillingForTenant({ tenantId, endDate, user }) {
-  // Find stalls for tenant (apply building scope for non-admins)
+/**
+ * Compute billing for all meters under a tenant (scoped to user's building if not admin).
+ * Returns per-meter results and aggregated totals_by_type and grand_totals.
+ */
+async function computeBillingForTenant({ tenantId, endDate, user, penaltyRatePct = 0 }) {
+  // All stalls of tenant
   const stalls = await Stall.findAll({
     where: { tenant_id: tenantId },
     attributes: ['stall_id', 'building_id'],
     raw: true
   });
-  if (!stalls.length) {
-    const err = new Error('No stalls found for this tenant.');
-    err.status = 404;
-    throw err;
-  }
+  if (!stalls.length) { const e = new Error('No stalls found for this tenant'); e.status = 404; throw e; }
 
+  // Scope to building if not admin
   const lvl = (user?.user_level || '').toLowerCase();
-  let scopedStalls = stalls;
-  if (lvl !== 'admin') {
-    const userBldg = user?.building_id;
-    if (!userBldg) {
-      const err = new Error('Unauthorized: No building assigned');
-      err.status = 401;
-      throw err;
-    }
-    scopedStalls = stalls.filter(s => s.building_id === userBldg);
-    if (!scopedStalls.length) {
-      const err = new Error('No access: Tenant has no stalls in your building');
-      err.status = 403;
-      throw err;
-    }
-  }
+  const scopedStalls = (lvl === 'admin') ? stalls : stalls.filter(s => s.building_id === user?.building_id);
+  if (!scopedStalls.length) { const e = new Error('No accessible stalls in your building'); e.status = 403; throw e; }
 
   const stallIds = scopedStalls.map(s => s.stall_id);
   const meters = await Meter.findAll({
@@ -411,65 +285,74 @@ async function computeBillingForTenant({ tenantId, endDate, user }) {
     attributes: ['meter_id'],
     raw: true
   });
-  if (!meters.length) {
-    const err = new Error('No meters found for this tenant (in your scope).');
-    err.status = 404;
-    throw err;
-  }
+  if (!meters.length) { const e = new Error('No meters for this tenant (in your scope)'); e.status = 404; throw e; }
 
   const results = [];
   for (const m of meters) {
     try {
-      const r = await computeBillingForMeter({ meterId: m.meter_id, endDate, user });
+      const r = await computeBillingForMeter({ meterId: m.meter_id, endDate, user, penaltyRatePct });
       results.push(r);
     } catch (innerErr) {
-      results.push({ meter_id: m.meter_id, error: innerErr.message || 'Failed to compute billing for this meter' });
+      results.push({ meter_id: m.meter_id, error: innerErr.message || 'Billing failed for this meter' });
     }
   }
 
-  // Rollups by meter type + grand currency totals
-  const totalsByType = {};
-  let grand = { base: 0, vat: 0, total: 0 };
+  // Roll up money by type and grand
+  const totals_by_type = {};
+  let grand_totals = { base: 0, vat: 0, wt: 0, penalty: 0, total: 0 };
 
   for (const r of results) {
     if (r.error) continue;
-    const t = r.meter_type;
-    if (!totalsByType[t]) {
-      totalsByType[t] = { consumption: 0, base: 0, vat: 0, total: 0 };
-    }
-    totalsByType[t].consumption += Number(r.totals.consumption) || 0;
-    totalsByType[t].base        += Number(r.totals.base) || 0;
-    totalsByType[t].vat         += Number(r.totals.vat) || 0;
-    totalsByType[t].total       += Number(r.totals.total) || 0;
+    const t = r.meter.meter_type;
+    const b = r.totals;
 
-    grand.base  += Number(r.totals.base) || 0;
-    grand.vat   += Number(r.totals.vat) || 0;
-    grand.total += Number(r.totals.total) || 0;
+    if (!totals_by_type[t]) totals_by_type[t] = { base: 0, vat: 0, wt: 0, penalty: 0, total: 0 };
+
+    totals_by_type[t].base    += b.base;
+    totals_by_type[t].vat     += b.vat;
+    totals_by_type[t].wt      += b.wt;
+    totals_by_type[t].penalty += b.penalty;
+    totals_by_type[t].total   += b.total;
+
+    grand_totals.base    += b.base;
+    grand_totals.vat     += b.vat;
+    grand_totals.wt      += b.wt;
+    grand_totals.penalty += b.penalty;
+    grand_totals.total   += b.total;
   }
 
-  Object.keys(totalsByType).forEach(k => {
-    totalsByType[k].consumption = round(totalsByType[k].consumption, 2);
-    totalsByType[k].base        = round(totalsByType[k].base, 2);
-    totalsByType[k].vat         = round(totalsByType[k].vat, 2);
-    totalsByType[k].total       = round(totalsByType[k].total, 2);
+  Object.keys(totals_by_type).forEach(k => {
+    totals_by_type[k].base    = round(totals_by_type[k].base);
+    totals_by_type[k].vat     = round(totals_by_type[k].vat);
+    totals_by_type[k].wt      = round(totals_by_type[k].wt);
+    totals_by_type[k].penalty = round(totals_by_type[k].penalty);
+    totals_by_type[k].total   = round(totals_by_type[k].total);
   });
-  grand.base  = round(grand.base, 2);
-  grand.vat   = round(grand.vat, 2);
-  grand.total = round(grand.total, 2);
 
-  return { meters: results, totals_by_type: totalsByType, grand_totals: grand };
+  grand_totals.base    = round(grand_totals.base);
+  grand_totals.vat     = round(grand_totals.vat);
+  grand_totals.wt      = round(grand_totals.wt);
+  grand_totals.penalty = round(grand_totals.penalty);
+  grand_totals.total   = round(grand_totals.total);
+
+  return { meters: results, totals_by_type, grand_totals };
 }
 
+/* =========================
+ * Exports
+ * ========================= */
 module.exports = {
-  // main entry points
+  // money
   computeBillingForMeter,
   computeBillingForTenant,
 
-  // exported helpers (useful for tests)
+  // helpers (if you want to reuse elsewhere)
+  round,
+  normalizePct,
   getCurrentPeriodFromEnd,
   getPreviousPeriodFromCurrent,
   getMaxReadingInPeriod,
-  getZeroRuns,
+  getTenantTaxKnobs,
   computeChargesByType,
-  round,
+  applyTaxes,
 };

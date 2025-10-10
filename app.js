@@ -17,7 +17,7 @@ var vatsRouter = require('./routes/vat');
 var wtsRouter = require('./routes/wt');
 var buildingsRouter = require('./routes/buildings');
 var billingsRouter = require('./routes/billings');
-
+var rocRouter = require('./routes/rateofchange');
 
 // Sequelize setup
 const sequelize = require('./models');
@@ -45,6 +45,7 @@ app.use('/vat', vatsRouter);
 app.use('/wt', wtsRouter);
 app.use('/buildings', buildingsRouter);
 app.use('/billings', billingsRouter);
+app.use('/roc', rocRouter);
 
 
 // catch 404 and forward to error handler
