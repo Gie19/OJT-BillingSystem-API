@@ -8,7 +8,7 @@ module.exports = {
     await qi.createTable('vat_codes', {
       tax_id:        { type: Sequelize.STRING(30), allowNull: false, primaryKey: true },
       vat_code:      { type: Sequelize.STRING(30), allowNull: false },      // unique index added below
-      vat_description:{ type: Sequelize.STRING(100), allowNull: false, defaultValue: 'Zero Rated' },
+      vat_description:{ type: Sequelize.STRING(250), allowNull: false, defaultValue: 'Zero Rated' },
 
       // Percent points (e.g., 12.00 = 12%)
       e_vat:         { type: Sequelize.DECIMAL(10,2), allowNull: false, defaultValue: 0.00 },
@@ -46,6 +46,6 @@ module.exports = {
   },
 
   async down(qi /*, Sequelize */) {
-    // This will be empty because you're starting fresh with a clean database
+    await qi.dropTable('vat_codes');
   }
 };

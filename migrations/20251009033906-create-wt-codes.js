@@ -5,7 +5,7 @@ module.exports = {
     await qi.createTable('wt_codes', {
       wt_id:          { type: Sequelize.STRING(30), allowNull: false, primaryKey: true },
       wt_code:        { type: Sequelize.STRING(30), allowNull: false },
-      wt_description: { type: Sequelize.STRING(100), allowNull: false, defaultValue: 'Insert Description' },
+      wt_description: { type: Sequelize.STRING(250), allowNull: false, defaultValue: 'Insert Description' },
       e_wt:           { type: Sequelize.DECIMAL(10,2), allowNull: false, defaultValue: 1.00 },
       w_wt:           { type: Sequelize.DECIMAL(10,2), allowNull: false, defaultValue: 1.00 },
       l_wt:           { type: Sequelize.DECIMAL(10,2), allowNull: false, defaultValue: 1.00 },
