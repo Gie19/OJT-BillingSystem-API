@@ -17,14 +17,14 @@ const Building = require('../models/Building');  // erate_perKwH, emin_con, wrat
  * ========================= */
 
 function round(n, d = 2) {
-  if (n === null || n === undefined) return null;
+  if (n === null || n === undefined || isNaN(n)) return null;
   return Number(Number(n).toFixed(d));
 }
 
-// Turn 12 → 0.12, 1 → 0.01, 0.12 → 0.12
+// Percent normalizer: 1 -> 0.01, 12 -> 0.12, 0.12 -> 0.12
 const normalizePct = (v) => {
   const n = Number(v) || 0;
-  return n > 1 ? n / 100 : n;
+  return n >= 1 ? n / 100 : n;
 };
 
 // LPG minimum is fixed (per your instruction)
@@ -96,12 +96,22 @@ async function getTenantTaxKnobs(tenant) {
  * Core math (Excel-style)
  * ========================= */
 
+/**
+ * Rule:
+ *  - VAT = base × vat%
+ *  - WT  = VAT × wt%           (withholding is a fraction of VAT)
+ *  - Pen = for_penalty ? base × penalty% : 0
+ *  - Total = base + VAT + Penalty − WT   (withholding is deducted)
+ */
 function applyTaxes({ base, vatRate, wtRate, forPenalty, penaltyRate }) {
   const b   = Number(base) || 0;
-  const vat = b * (Number(vatRate) || 0);      // base × VAT%
-  const wt  = vat * (Number(wtRate) || 0);     // VAT × WT%
-  const pen = forPenalty ? b * (Number(penaltyRate) || 0) : 0; // base × penalty% (only if flag true)
-  const total = b + vat + wt + pen;
+
+  const vat = b * (Number(vatRate) || 0);          // base × VAT%
+  const wt  = vat * (Number(wtRate) || 0);         // VAT × WT%
+  const pen = forPenalty ? b * (Number(penaltyRate) || 0) : 0;
+
+  const total = b + vat + pen - wt;                // deduct withholding
+
   return { vat: round(vat), wt: round(wt), penalty: round(pen), total: round(total) };
 }
 

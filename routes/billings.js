@@ -4,8 +4,8 @@
 const express = require('express');
 const router = express.Router();
 
-const authenticateToken = require('../middleware/authenticateToken');
-const authorizeRole     = require('../middleware/authorizeRole');
+const authenticateToken  = require('../middleware/authenticateToken');
+const authorizeRole      = require('../middleware/authorizeRole');
 const getCurrentDateTime = require('../utils/getCurrentDateTime');
 
 const {
@@ -31,7 +31,6 @@ router.get(
         return res.status(400).json({ error: 'Invalid endDate. Use YYYY-MM-DD.' });
       }
 
-      // Optional percent, defaults to 0 if omitted
       const penaltyRatePct = Number(req.query.penalty_rate) || 0;
 
       const result = await computeBillingForMeter({
