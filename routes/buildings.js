@@ -2,38 +2,44 @@
 const express = require('express');
 const router = express.Router();
 
-// Utilities & middleware
-const getCurrentDateTime = require('../utils/getCurrentDateTime');
-const authenticateToken = require('../middleware/authenticateToken');
-const authorizeRole = require('../middleware/authorizeRole');
-const authorizeUtilityRole = require('../middleware/authorizeUtilityRole');
-const { authorizeBuildingParam } = require('../middleware/authorizeBuilding');
-
-// Sequelize helpers
 const { Op } = require('sequelize');
 
 // Models
-const User = require('../models/User');
-const Tenant = require('../models/Tenant');
-const Stall = require('../models/Stall');
 const Building = require('../models/Building');
 
-// All routes below require a valid token
-router.use(authenticateToken);
+// Auth/middlewares
+const authenticateToken = require('../middleware/authenticateToken');
+const authorizeRole = require('../middleware/authorizeRole');
+const {
+  authorizeBuildingParam,
+  attachBuildingScope,
+  enforceRecordBuilding
+} = require('../middleware/authorizeBuilding');
 
-// ---------- helpers ----------
+// Utils
+const { getCurrentDateTime } = require('../utils/getCurrentDateTime');
 
-const NUM_FIELDS = ['erate_perKwH', 'emin_con', 'wrate_perCbM', 'wmin_con', 'lrate_perKg'];
+// ---------- config / helpers ----------
 
-// map common variations -> canonical keys
+// All numeric building rate fields (DECIMAL(10,2) in DB)
+const NUM_FIELDS = [
+  'erate_perKwH',  // electric rate / kWh
+  'emin_con',      // electric min consumption
+  'wrate_perCbM',  // water rate / m^3
+  'wmin_con',      // water min consumption
+  'lrate_perKg',   // LPG rate / kg
+  'markup_rate'    // NEW markup rate (0+)
+];
+
+// Optional aliases accepted in payloads
 const KEY_MAP = new Map([
-  // electric rate + min
+  // electric
   ['erate_perkwh', 'erate_perKwH'],
   ['e_rate_per_kwh', 'erate_perKwH'],
   ['emin_con', 'emin_con'],
   ['e_min_con', 'emin_con'],
 
-  // water rate + min
+  // water
   ['wrate_percbm', 'wrate_perCbM'],
   ['w_rate_per_cbm', 'wrate_perCbM'],
   ['wmin_con', 'wmin_con'],
@@ -42,205 +48,236 @@ const KEY_MAP = new Map([
   // lpg
   ['lrate_perkg', 'lrate_perKg'],
   ['l_rate_per_kg', 'lrate_perKg'],
+
+  // markup aliases
+  ['markuprate', 'markup_rate'],
+  ['markup', 'markup_rate'],
 ]);
 
-// normalize an object’s keys to canonical model field names
-function normalizeRateKeys(obj = {}) {
-  const out = {};
-  for (const [k, v] of Object.entries(obj)) {
-    const nk = KEY_MAP.get(k.toLowerCase().replace(/\s+/g, '').replace(/__/g, '_')) || k;
-    out[nk] = v;
-  }
-  return out;
+function normalizeKey(k) {
+  if (!k) return k;
+  const lk = String(k).trim().toLowerCase();
+  return KEY_MAP.get(lk) || k;
 }
 
-// coerce numeric fields, return {ok, data|error}
 function coerceRateNumbers(candidate) {
-  const updates = {};
-  for (const [k, v] of Object.entries(candidate)) {
-    if (NUM_FIELDS.includes(k)) {
-      if (v === '' || v == null) {
-        return { ok: false, error: `Field ${k} is required and must be a number` };
-      }
-      const num = Number(v);
-      if (!Number.isFinite(num)) {
-        return { ok: false, error: `Field ${k} must be a valid number` };
-      }
-      updates[k] = Math.round(num * 100) / 100; // match DECIMAL(10,2)
-    } else {
-      updates[k] = v;
-    }
-  }
-  return { ok: true, data: updates };
-}
-
-/** Helper: filter which base-rate fields a biller may edit */
-function filterBuildingBaseRatesByUtility(reqBody, userUtilities) {
-  const map = {
-    electric: ['erate_perKwH', 'emin_con'],
-    water:    ['wrate_perCbM', 'wmin_con'],
-    lpg:      ['lrate_perKg'],
-  };
-  const allowed = new Set();
-  (userUtilities || []).forEach(u => (map[u] || []).forEach(f => allowed.add(f)));
+  // Ensure only known numeric fields are kept, and coerce to stringified fixed(2).
   const out = {};
-  for (const [k, v] of Object.entries(reqBody || {})) {
-    if (allowed.has(k)) out[k] = v;
+  for (const f of NUM_FIELDS) {
+    if (candidate[f] === undefined) continue;
+    const v = candidate[f];
+    if (v === null || v === '') continue;
+
+    const num = Number(v);
+    if (!Number.isFinite(num) || num < 0) {
+      const msg = `Invalid value for ${f}: must be a non-negative number`;
+      const err = new Error(msg);
+      err.status = 400;
+      throw err;
+    }
+    out[f] = Number(num.toFixed(2)); // keep numeric; Sequelize will handle DECIMAL
   }
   return out;
 }
 
-function normalizeUtilityRole(uraw) {
-  if (Array.isArray(uraw)) return uraw;
-  if (uraw == null) return [];
-  if (typeof uraw === 'string') {
-    try {
-      const parsed = JSON.parse(uraw);
-      return Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
-    } catch {
-      return uraw.trim() ? [uraw.trim()] : [];
-    }
-  }
-  return [uraw];
+function pick(obj, keys) {
+  const o = {};
+  for (const k of keys) if (obj[k] !== undefined) o[k] = obj[k];
+  return o;
+}
+
+function hasAnyRole(user, roles) {
+  const r = Array.isArray(user?.user_roles) ? user.user_roles.map(x => String(x).toLowerCase()) : [];
+  return roles.some(role => r.includes(String(role).toLowerCase()));
 }
 
 // ---------- routes ----------
 
+// All building routes require a valid token
+router.use(authenticateToken);
+
 /**
  * GET /buildings
- * Admin-only: list all buildings
+ * List buildings visible to the caller.
+ * Read access: admin, operator, biller, reader
  */
-router.get('/', authorizeRole('admin'), async (req, res) => {
-  try {
-    const buildings = await Building.findAll();
-    res.json(buildings);
-  } catch (err) {
-    console.error('Database error:', err);
-    res.status(500).json({ error: err.message });
+router.get(
+  '/',
+  authorizeRole('admin', 'operator', 'biller', 'reader'),
+  attachBuildingScope(),
+  async (req, res) => {
+    try {
+      const where = req.buildingWhere ? req.buildingWhere('building_id') : {};
+      const rows = await Building.findAll({
+        where,
+        order: [['building_id', 'ASC']]
+      });
+      res.json(rows);
+    } catch (err) {
+      console.error('GET /buildings error:', err);
+      res.status(500).json({ error: err.message });
+    }
   }
-});
+);
 
 /**
  * GET /buildings/:id
- * Admin-only: fetch a building by id
+ * Fetch a single building.
+ * Read access: admin, operator, biller, reader
  */
-router.get('/:id', authorizeRole('admin'), async (req, res) => {
-  try {
-    const building = await Building.findOne({ where: { building_id: req.params.id } });
-    if (!building) return res.status(404).json({ message: 'Building not found' });
-    res.json(building);
-  } catch (err) {
-    console.error('Database error:', err);
-    res.status(500).json({ error: err.message });
+router.get(
+  '/:id',
+  authorizeRole('admin', 'operator', 'biller', 'reader'),
+  authorizeBuildingParam(),
+  async (req, res) => {
+    try {
+      const building = await Building.findOne({ where: { building_id: req.params.id } });
+      if (!building) return res.status(404).json({ message: 'Building not found' });
+      res.json(building);
+    } catch (err) {
+      console.error('GET /buildings/:id error:', err);
+      res.status(500).json({ error: err.message });
+    }
   }
-});
+);
 
 /**
  * POST /buildings
- * Admin-only: create a new building
- * Body: { building_name, [erate_perKwH, emin_con, wrate_perCbM, wmin_con, lrate_perKg] }
+ * Create a building.
+ * Write access: admin only
+ * Body may include any of NUM_FIELDS, including markup_rate.
  */
-router.post('/', authorizeRole('admin'), async (req, res) => {
-  const { building_name, ...rest } = req.body || {};
-  if (!building_name) {
-    return res.status(400).json({ error: 'building_name is required' });
+router.post(
+  '/',
+  authorizeRole('admin'),
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+
+      // Normalize keys (aliases -> canonical)
+      const canonical = {};
+      for (const [k, v] of Object.entries(body)) {
+        canonical[normalizeKey(k)] = v;
+      }
+
+      // Build candidate object with name + numeric fields
+      const candidate = {
+        building_name: canonical.building_name?.trim()
+      };
+      for (const f of NUM_FIELDS) {
+        if (canonical[f] !== undefined) candidate[f] = canonical[f];
+      }
+
+      if (!candidate.building_name) {
+        return res.status(400).json({ error: 'building_name is required' });
+      }
+
+      // Generate next building_id: BLDG-<n+1>
+      const rows = await Building.findAll({
+        where: { building_id: { [Op.like]: 'BLDG-%' } },
+        attributes: ['building_id'],
+        raw: true
+      });
+      const maxNum = rows.reduce((max, r) => {
+        const m = String(r.building_id).match(/^BLDG-(\d+)$/);
+        return m ? Math.max(max, Number(m[1])) : max;
+      }, 0);
+      const newId = `BLDG-${maxNum + 1}`;
+
+      const rates = coerceRateNumbers(candidate);
+
+      const now = getCurrentDateTime ? getCurrentDateTime() : new Date().toISOString();
+      const updatedBy = req.user?.user_fullname || req.user?.user_id || 'system';
+
+      const created = await Building.create({
+        building_id: newId,
+        building_name: candidate.building_name,
+        ...rates,
+        last_updated: now,
+        updated_by: updatedBy
+      });
+
+      res.status(201).json(created);
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('POST /buildings error:', err);
+      res.status(status).json({ error: err.message });
+    }
   }
-
-  try {
-    // Generate next BLDG-<n> (cross-dialect; MSSQL-safe)
-    const rows = await Building.findAll({
-      where: { building_id: { [Op.like]: 'BLDG-%' } },
-      attributes: ['building_id'],
-      raw: true
-    });
-    const maxNum = rows.reduce((max, r) => {
-      const m = String(r.building_id).match(/^BLDG-(\d+)$/);
-      return m ? Math.max(max, Number(m[1])) : max;
-    }, 0);
-    const newBuildingId = `BLDG-${maxNum + 1}`;
-
-    // optional base rates on create (normalize + coerce)
-    const normalized = normalizeRateKeys(rest);
-    const candidate = {};
-    for (const f of NUM_FIELDS) if (normalized[f] !== undefined) candidate[f] = normalized[f];
-    const coerced = coerceRateNumbers(candidate);
-    if (!coerced.ok) return res.status(400).json({ error: coerced.error });
-
-    const now = getCurrentDateTime();
-    await Building.create({
-      building_id: newBuildingId,
-      building_name,
-      // defaults exist in model; we also allow overrides via body
-      ...coerced.data,
-      last_updated: now,
-      updated_by: req.user.user_fullname
-    });
-
-    res.status(201).json({
-      message: 'Building created successfully',
-      buildingId: newBuildingId
-    });
-  } catch (err) {
-    console.error('Error in POST /buildings:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
+);
 
 /**
  * PUT /buildings/:id
- * Admin-only: update name and/or any base rates
- * Body: { building_name?, erate_perKwH?, emin_con?, wrate_perCbM?, wmin_con?, lrate_perKg? }
+ * Update building name and/or any rates.
+ * Write access: admin only (use /:id/base-rates for biller utility edits)
  */
-router.put('/:id', authorizeRole('admin'), async (req, res) => {
-  const buildingId = req.params.id;
+router.put(
+  '/:id',
+  authorizeRole('admin'),
+  authorizeBuildingParam(),
+  async (req, res) => {
+    try {
+      const b = await Building.findOne({ where: { building_id: req.params.id } });
+      if (!b) return res.status(404).json({ message: 'Building not found' });
 
-  if (!buildingId) {
-    return res.status(400).json({ error: 'building_id is required' });
-  }
+      const body = req.body || {};
+      const canonical = {};
+      for (const [k, v] of Object.entries(body)) {
+        canonical[normalizeKey(k)] = v;
+      }
 
-  try {
-    const building = await Building.findOne({ where: { building_id: buildingId } });
-    if (!building) {
-      return res.status(404).json({ error: 'Building not found' });
+      const updates = {};
+      if (canonical.building_name !== undefined) {
+        const name = String(canonical.building_name || '').trim();
+        if (!name) return res.status(400).json({ error: 'building_name cannot be empty' });
+        updates.building_name = name;
+      }
+
+      for (const f of NUM_FIELDS) {
+        if (canonical[f] !== undefined) updates[f] = canonical[f];
+      }
+
+      const rates = coerceRateNumbers(updates);
+
+      const now = getCurrentDateTime ? getCurrentDateTime() : new Date().toISOString();
+      const updatedBy = req.user?.user_fullname || req.user?.user_id || 'system';
+
+      await b.update({
+        ...('building_name' in updates ? { building_name: updates.building_name } : {}),
+        ...rates,
+        last_updated: now,
+        updated_by: updatedBy
+      });
+
+      res.json(b);
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('PUT /buildings/:id error:', err);
+      res.status(status).json({ error: err.message });
     }
-
-    // normalize + pick allowed
-    const normalized = normalizeRateKeys(req.body || {});
-    const up = {};
-    if (normalized.building_name !== undefined) up.building_name = normalized.building_name;
-    for (const f of NUM_FIELDS) if (normalized[f] !== undefined) up[f] = normalized[f];
-
-    // coerce numeric rate fields
-    const coerced = coerceRateNumbers(up);
-    if (!coerced.ok) return res.status(400).json({ error: coerced.error });
-
-    await building.update({
-      ...coerced.data,
-      last_updated: getCurrentDateTime(),
-      updated_by: req.user.user_fullname
-    });
-
-    res.json({ message: 'Building updated successfully' });
-  } catch (err) {
-    console.error('Error in PUT /buildings/:id:', err);
-    res.status(500).json({ error: err.message });
   }
-});
+);
 
 /**
  * GET /buildings/:id/base-rates
- * Admin or biller (scoped): fetch only base-rate fields
+ * Read the set of base rates (includes markup_rate).
+ * Read access: admin, biller, reader, operator
  */
 router.get(
   '/:id/base-rates',
-  authorizeRole('admin','biller'),
-  authorizeBuildingParam(), // for non-admin, must match their building
+  authorizeRole('admin', 'biller', 'operator', 'reader'),
+  authorizeBuildingParam(),
   async (req, res) => {
     try {
       const building = await Building.findOne({
         where: { building_id: req.params.id },
         attributes: [
-          'building_id','erate_perKwH','emin_con','wrate_perCbM','wmin_con','lrate_perKg','last_updated','updated_by'
+          'building_id',
+          'erate_perKwH', 'emin_con',
+          'wrate_perCbM', 'wmin_con',
+          'lrate_perKg',
+          'markup_rate',
+          'last_updated', 'updated_by'
         ]
       });
       if (!building) return res.status(404).json({ message: 'Building not found' });
@@ -254,95 +291,78 @@ router.get(
 
 /**
  * PUT /buildings/:id/base-rates
- * Admin or biller (scoped): update base-rate fields only
- * - Admin may edit any base-rate field
- * - Biller may only edit fields for utilities in their utility_role
+ * Update base rates.
+ * - Admin: can update ALL rate fields, including markup_rate.
+ * - Biller: can update utility-specific fields only (no markup_rate).
  */
 router.put(
   '/:id/base-rates',
-  authorizeRole('admin','biller'),
+  authorizeRole('admin', 'biller'),
   authorizeBuildingParam(),
-  authorizeUtilityRole({ roles: ['biller'], anyOf: ['electric','water','lpg'], requireAll: false }),
   async (req, res) => {
     try {
       const building = await Building.findOne({ where: { building_id: req.params.id } });
-      if (!building) return res.status(404).json({ error: 'Building not found' });
+      if (!building) return res.status(404).json({ message: 'Building not found' });
 
-      const isAdmin = (req.user.user_level || '').toLowerCase() === 'admin';
-      const normalized = normalizeRateKeys(req.body || {});
-      let candidate = {};
-      for (const f of NUM_FIELDS) if (normalized[f] !== undefined) candidate[f] = normalized[f];
-
-      if (!isAdmin) {
-        const allowed = filterBuildingBaseRatesByUtility(candidate, normalizeUtilityRole(req.user.utility_role));
-        if (Object.keys(allowed).length === 0) {
-          return res.status(400).json({ error: 'No permitted base-rate fields to update for your utility access.' });
-        }
-        candidate = allowed;
+      const body = req.body || {};
+      const canonical = {};
+      for (const [k, v] of Object.entries(body)) {
+        canonical[normalizeKey(k)] = v;
       }
 
-      const coerced = coerceRateNumbers(candidate);
-      if (!coerced.ok) return res.status(400).json({ error: coerced.error });
+      const isAdmin = hasAnyRole(req.user, ['admin']);
+      const isBiller = hasAnyRole(req.user, ['biller']);
+
+      // Determine which fields are allowed to be edited
+      let allowed = [];
+      if (isAdmin) {
+        // Admins can edit everything
+        allowed = [...NUM_FIELDS];
+      } else if (isBiller) {
+        // Billers: only utility rates, not markup_rate
+        allowed = ['erate_perKwH', 'emin_con', 'wrate_perCbM', 'wmin_con', 'lrate_perKg'];
+      } else {
+        return res.status(403).json({ error: 'Forbidden: role cannot edit base rates' });
+      }
+
+      // Collect only allowed fields from payload
+      const candidate = pick(canonical, allowed);
+
+      if (Object.keys(candidate).length === 0) {
+        return res.status(400).json({ error: 'No editable fields provided' });
+      }
+
+      const rates = coerceRateNumbers(candidate);
+
+      const now = getCurrentDateTime ? getCurrentDateTime() : new Date().toISOString();
+      const updatedBy = req.user?.user_fullname || req.user?.user_id || 'system';
 
       await building.update({
-        ...coerced.data,
-        last_updated: getCurrentDateTime(),
-        updated_by: req.user.user_fullname
+        ...rates,
+        last_updated: now,
+        updated_by: updatedBy
       });
 
-      res.json({ message: 'Building base rates updated' });
+      // return the full base-rate view
+      const refreshed = await Building.findOne({
+        where: { building_id: req.params.id },
+        attributes: [
+          'building_id',
+          'erate_perKwH', 'emin_con',
+          'wrate_perCbM', 'wmin_con',
+          'lrate_perKg',
+          'markup_rate',
+          'last_updated', 'updated_by'
+        ]
+      });
+
+      res.json(refreshed);
     } catch (err) {
+      const status = err.status || 500;
       console.error('PUT /buildings/:id/base-rates error:', err);
-      res.status(500).json({ error: err.message });
+      res.status(status).json({ error: err.message });
     }
   }
 );
-
-/**
- * DELETE /buildings/:id
- * Admin-only: delete building if not referenced
- */
-router.delete('/:id', authorizeRole('admin'), async (req, res) => {
-  const buildingId = req.params.id;
-
-  if (!buildingId) {
-    return res.status(400).json({ error: 'Building ID is required' });
-  }
-
-  try {
-    // Check for referencing records in User, Tenant, Stall
-    const [userRefs, tenantRefs, stallRefs] = await Promise.all([
-      User.findAll({ where: { building_id: buildingId }, attributes: ['user_id'] }),
-      Tenant.findAll({ where: { building_id: buildingId }, attributes: ['tenant_id'] }),
-      Stall.findAll({ where: { building_id: buildingId }, attributes: ['stall_id'] }),
-    ]);
-
-    const users = userRefs.map(u => u.user_id);
-    const tenants = tenantRefs.map(t => t.tenant_id);
-    const stalls = stallRefs.map(s => s.stall_id);
-
-    const errors = [];
-    if (users.length) errors.push(`User(s): [${users.join(', ')}]`);
-    if (tenants.length) errors.push(`Tenant(s): [${tenants.join(', ')}]`);
-    if (stalls.length) errors.push(`Stall(s): [${stalls.join(', ')}]`);
-
-    if (errors.length) {
-      return res.status(400).json({
-        error: `Cannot delete building. It is still referenced by: ${errors.join('; ')}`
-      });
-    }
-
-    // Safe to delete
-    const deleted = await Building.destroy({ where: { building_id: buildingId } });
-    if (deleted === 0) {
-      return res.status(404).json({ error: 'Building not found' });
-    }
-
-    res.json({ message: `Building with ID ${buildingId} deleted successfully` });
-  } catch (err) {
-    console.error('Error in DELETE /buildings/:id:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
 
 module.exports = router;
