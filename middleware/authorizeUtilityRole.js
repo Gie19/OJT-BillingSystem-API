@@ -6,7 +6,7 @@ const Stall = require('../models/Stall');
  * Enforce per-utility access (electric | water | lpg) for selected roles.
  *
  * Options:
- *  - roles:        roles this applies to (default ['biller'])   <-- operators no longer checked here
+ *  - roles:        roles this applies to (default ['biller'])
  *  - anyOf:        when no meter is involved, require these utilities
  *  - requireAll:   if true require ALL in anyOf, else ANY one (default true)
  *  - adminBypass:  admins skip the check (default true)
@@ -36,13 +36,14 @@ function authorizeUtilityRole(opts = {}) {
       const user = req.user;
       if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
-      const level = String(user.user_level || '').toLowerCase();
+      const userRoles = Array.isArray(user.user_roles) ? user.user_roles.map(r => String(r).toLowerCase()) : [];
 
       // Admin bypass
-      if (adminBypass && level === 'admin') return next();
+      if (adminBypass && userRoles.includes('admin')) return next();
 
-      // If the caller's role isn't in scope, skip checks (operators are not included anymore)
-      if (!ENFORCED_ROLES.includes(level)) return next();
+      // If the caller's roles don't intersect the enforced set, skip checks
+      const roleInScope = userRoles.some(r => ENFORCED_ROLES.includes(r));
+      if (!roleInScope) return next();
 
       // Normalize user's allowed utilities
       const granted = Array.isArray(user.utility_role)

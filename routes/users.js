@@ -12,25 +12,66 @@ const { Op } = require('sequelize');
 // Models
 const User = require('../models/User');
 
+// All routes below require a valid token
 router.use(authenticateToken);
 
+// ---- helpers ----
+const ALLOWED_ROLES = new Set(['admin', 'operator', 'biller', 'reader']);
+
+function normalizeArray(v) {
+  if (Array.isArray(v)) return v;
+  if (v == null) return [];
+  if (typeof v === 'string') {
+    // Try JSON first, then fallback to comma-separated
+    try { const parsed = JSON.parse(v); if (Array.isArray(parsed)) return parsed; } catch {}
+    return v.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  return [v];
+}
+
+// ---- routes ----
+
 /** GET all users (admin) */
-router.get('/', authorizeRole('admin'), async (req, res) => {
+router.get('/', authorizeRole('admin'), async (_req, res) => {
   try {
     const users = await User.findAll();
-    res.json(users);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    // Keep response tidy: ensure arrays are arrays
+    res.json(users.map(u => ({
+      user_id: u.user_id,
+      user_fullname: u.user_fullname,
+      user_roles: Array.isArray(u.user_roles) ? u.user_roles : [],
+      building_ids: Array.isArray(u.building_ids) ? u.building_ids : [],
+      utility_role: Array.isArray(u.utility_role) ? u.utility_role : [],
+    })));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 /** CREATE user (admin) */
 router.post('/', authorizeRole('admin'), async (req, res) => {
   try {
-    const { user_password, user_fullname, user_level, building_id = null, utility_role = null } = req.body || {};
-    if (!user_password || !user_fullname || !user_level) {
-      return res.status(400).json({ error: 'user_password, user_fullname, user_level are required' });
+    const {
+      user_password,
+      user_fullname,
+      user_roles: rolesIn,
+      building_ids: buildingsIn,
+      utility_role: utilitiesIn
+    } = req.body || {};
+
+    if (!user_password || !user_fullname) {
+      return res.status(400).json({ error: 'user_password and user_fullname are required' });
     }
 
-    // Build next USER-<n> (cross-dialect; MSSQL-safe)
+    // Validate & normalize arrays
+    const user_roles = normalizeArray(rolesIn)
+      .map(x => String(x).toLowerCase())
+      .filter(x => ALLOWED_ROLES.has(x));
+
+    const building_ids = normalizeArray(buildingsIn).map(String);
+    const utility_role = normalizeArray(utilitiesIn).map(String);
+
+    // Build next USER-<n> (MSSQL safe)
     const rows = await User.findAll({
       where: { user_id: { [Op.like]: 'USER-%' } },
       attributes: ['user_id'],
@@ -42,19 +83,27 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
     }, 0);
     const newUserId = `USER-${maxNum + 1}`;
 
-    // Hash outside model (as per your setup)
     const hashed = await hashPassword(user_password);
 
     const created = await User.create({
       user_id: newUserId,
       user_password: hashed,
       user_fullname,
-      user_level,
-      building_id,
+      user_roles,
+      building_ids,
       utility_role
     });
-    res.status(201).json(created);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+
+    res.status(201).json({
+      user_id: created.user_id,
+      user_fullname: created.user_fullname,
+      user_roles: created.user_roles,
+      building_ids: created.building_ids,
+      utility_role: created.utility_role
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 /** UPDATE user (admin) */
@@ -63,18 +112,44 @@ router.put('/:user_id', authorizeRole('admin'), async (req, res) => {
     const user = await User.findByPk(req.params.user_id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const { user_password, user_fullname, user_level, building_id, utility_role } = req.body || {};
-    const updates = {};
+    const {
+      user_password,
+      user_fullname,
+      user_roles: rolesIn,
+      building_ids: buildingsIn,
+      utility_role: utilitiesIn
+    } = req.body || {};
 
-    if (user_password) updates.user_password = await hashPassword(user_password);
-    if (user_fullname) updates.user_fullname = user_fullname;
-    if (user_level) updates.user_level = user_level;
-    if (building_id !== undefined) updates.building_id = building_id;
-    if (utility_role !== undefined) updates.utility_role = utility_role;
+    if (user_fullname !== undefined) user.user_fullname = user_fullname;
+    if (user_password) user.user_password = await hashPassword(user_password);
 
-    await user.update(updates);
-    res.json(user);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    if (rolesIn !== undefined) {
+      const roles = normalizeArray(rolesIn)
+        .map(x => String(x).toLowerCase())
+        .filter(x => ALLOWED_ROLES.has(x));
+      user.user_roles = roles;
+    }
+
+    if (buildingsIn !== undefined) {
+      user.building_ids = normalizeArray(buildingsIn).map(String);
+    }
+
+    if (utilitiesIn !== undefined) {
+      user.utility_role = normalizeArray(utilitiesIn).map(String);
+    }
+
+    await user.save();
+
+    res.json({
+      user_id: user.user_id,
+      user_fullname: user.user_fullname,
+      user_roles: user.user_roles,
+      building_ids: user.building_ids,
+      utility_role: user.utility_role
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 /** DELETE user (admin) */
@@ -84,7 +159,9 @@ router.delete('/:user_id', authorizeRole('admin'), async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
     await user.destroy();
     res.json({ message: 'User deleted' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 module.exports = router;

@@ -1,42 +1,36 @@
 // middleware/authorizeBuilding.js
 
-/**
- * Centralized building authorization & scoping helpers.
- * - Admins bypass all building checks.
- * - Non-admins are restricted to req.user.building_id (from JWT via authenticateToken).
- *
- * Exports:
- *  1) authorizeBuildingParam()
- *  2) attachBuildingScope()
- *  3) enforceRecordBuilding(getBuildingIdForRequest)
- */
+// Helpers
+const isAdmin = (req) => {
+  const roles = Array.isArray(req.user?.user_roles) ? req.user.user_roles : [];
+  return roles.map(x => String(x || '').toLowerCase()).includes('admin');
+};
 
-function isAdmin(req) {
-  return ((req.user?.user_level) || '').toLowerCase() === 'admin';
-}
+const getUserBuildings = (req) => {
+  const b = req.user?.building_ids;
+  return Array.isArray(b) ? b : [];
+};
 
 /**
  * If a request *provides* a building_id (body/params/query or req.requestedBuildingId),
- * ensure non-admin users only act within their assigned building.
+ * ensure non-admin users only act within their assigned buildings.
  */
 function authorizeBuildingParam() {
   return (req, res, next) => {
-    // Admins skip building checks
     if (isAdmin(req)) return next();
 
-    const userBuildingId = req.user?.building_id; // from JWT
-    if (!userBuildingId) {
-      return res.status(401).json({ error: 'Unauthorized: No building assigned' });
+    const buildings = getUserBuildings(req);
+    if (!buildings.length) {
+      return res.status(401).json({ error: 'Unauthorized: No buildings assigned' });
     }
 
-    // Controller may pre-set requested building (e.g., from path segments)
-    const requestBuildingId =
+    const requested =
       req.requestedBuildingId ||
       req.body?.building_id ||
       req.params?.building_id ||
       req.query?.building_id;
 
-    if (requestBuildingId && userBuildingId !== requestBuildingId) {
+    if (requested && !buildings.includes(requested)) {
       return res.status(403).json({ error: 'Forbidden: Building mismatch' });
     }
 
@@ -47,21 +41,26 @@ function authorizeBuildingParam() {
 /**
  * For list/index GETs:
  *  - Admins: no restriction.
- *  - Non-admins: attaches helpers tied to their building_id:
- *       req.restrictToBuildingId
- *       req.buildingWhere(key='building_id') -> { [key]: buildingId } or {}
+ *  - Non-admins: attaches helpers tied to their building_ids:
+ *       req.restrictToBuildingIds
+ *       req.buildingWhere(key='building_id') -> { [key]: building_ids } or {}
  */
 function attachBuildingScope() {
   return (req, _res, next) => {
-    if (!isAdmin(req)) {
-      const userBuildingId = req.user?.building_id;
-      req.restrictToBuildingId = userBuildingId;
-      req.buildingWhere = (key = 'building_id') =>
-        userBuildingId ? { [key]: userBuildingId } : {};
-    } else {
-      req.restrictToBuildingId = undefined;
+    if (isAdmin(req)) {
+      req.restrictToBuildingIds = undefined;
       req.buildingWhere = () => ({});
+      return next();
     }
+
+    const buildings = getUserBuildings(req);
+    if (!buildings.length) {
+      return res.status(401).json({ error: 'Unauthorized: No buildings assigned' });
+    }
+
+    req.restrictToBuildingIds = buildings;
+    req.buildingWhere = (key = 'building_id') => ({ [key]: buildings });
+
     next();
   };
 }
@@ -73,24 +72,19 @@ function attachBuildingScope() {
  */
 function enforceRecordBuilding(getBuildingIdForRequest) {
   return async (req, res, next) => {
-    // Admins skip building checks
     if (isAdmin(req)) return next();
 
-    const userBuildingId = req.user?.building_id;
-    if (!userBuildingId) {
-      return res.status(401).json({ error: 'Unauthorized: No building assigned' });
+    const buildings = getUserBuildings(req);
+    if (!buildings.length) {
+      return res.status(401).json({ error: 'Unauthorized: No buildings assigned' });
     }
 
     try {
       const recordBuildingId = await getBuildingIdForRequest(req);
+      if (!recordBuildingId) return next(); // let route decide 404 vs empty
 
-      // Let route handler 404 if the record doesn't exist; only enforce when we know the building.
-      if (!recordBuildingId) return next();
-
-      if (recordBuildingId !== userBuildingId) {
-        return res
-          .status(403)
-          .json({ error: 'Forbidden: Resource not in your assigned building' });
+      if (!buildings.includes(recordBuildingId)) {
+        return res.status(403).json({ error: 'Forbidden: Resource not in your buildings' });
       }
 
       next();

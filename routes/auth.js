@@ -21,13 +21,13 @@ router.post('/login', async (req, res) => {
     const match = await comparePassword(user_password, user.user_password);
     if (!match) return res.status(401).json({ error: 'Invalid credentials' });
 
-    // Add utility_role to the token; building_id can be null for admins
+    // Arrays-only payload
     const payload = {
       user_id: user.user_id,
-      user_level: user.user_level,       // 'admin'|'operator'|'biller'|'reader'
       user_fullname: user.user_fullname,
-      building_id: user.building_id || null,
-      utility_role: user.utility_role || null
+      user_roles: Array.isArray(user.user_roles) ? user.user_roles : [],
+      building_ids: Array.isArray(user.building_ids) ? user.building_ids : [],
+      utility_role: Array.isArray(user.utility_role) ? user.utility_role : []
     };
 
     const token = jwt.sign(payload, process.env.JWT_SECRET, {
