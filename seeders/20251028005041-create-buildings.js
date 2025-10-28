@@ -17,7 +17,7 @@ module.exports = {
         wrate_perCbM: 93.00,       // keep numeric, not string
         wmin_con: 3.00,
         lrate_perKg: 88.00,
-        markup_rate: 1.15,
+        markup_rate: 1.5,
         last_updated: new Date(),
         updated_by: 'System Admin',
       },
@@ -29,7 +29,7 @@ module.exports = {
         wrate_perCbM: 93.00,
         wmin_con: 3.00,
         lrate_perKg: 88.00,
-        markup_rate: 1.15,
+        markup_rate: 1.5,
         last_updated: new Date(),
         updated_by: 'System Admin',
       }
