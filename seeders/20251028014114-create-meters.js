@@ -35,7 +35,7 @@ module.exports = {
       },
       {
         meter_id:    'MTR-4',
-        meter_type:  'electric', // fixed
+        meter_type:  'electric', 
         meter_sn:    'WDC-E-2362327',
         meter_mult:  240.00,
         meter_status:'active',
@@ -45,7 +45,7 @@ module.exports = {
       },
       {
         meter_id:    'MTR-5',
-        meter_type:  'eletric',
+        meter_type:  'electric',
         meter_sn:    'WDC-E-809990',
         meter_mult:  1.00,
         meter_status:'active',
