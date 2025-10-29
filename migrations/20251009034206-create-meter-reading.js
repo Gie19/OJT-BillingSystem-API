@@ -3,13 +3,15 @@
 module.exports = {
   async up(qi, Sequelize) {
     await qi.createTable('meter_reading', {
-      reading_id:   { type: Sequelize.STRING(30), allowNull: false, primaryKey: true },
-      meter_id:     { type: Sequelize.STRING(30), allowNull: false },
-      reading_value:{ type: Sequelize.DECIMAL(30,2), allowNull: false, defaultValue: 0.00 }, // removed .UNSIGNED
-      read_by:      { type: Sequelize.STRING(30), allowNull: false },
-      lastread_date:{ type: Sequelize.DATEONLY, allowNull: false },
-      last_updated: { type: Sequelize.DATE, allowNull: false },
-      updated_by:   { type: Sequelize.STRING(30), allowNull: false },
+      reading_id:    { type: Sequelize.STRING(30), allowNull: false, primaryKey: true },
+      meter_id:      { type: Sequelize.STRING(30), allowNull: false },
+      reading_value: { type: Sequelize.DECIMAL(30,2), allowNull: false, defaultValue: 0.00 }, // MSSQL OK
+      read_by:       { type: Sequelize.STRING(30), allowNull: false },
+      lastread_date: { type: Sequelize.DATEONLY, allowNull: false },
+      last_updated:  { type: Sequelize.DATE, allowNull: false },
+      updated_by:    { type: Sequelize.STRING(30), allowNull: false },
+      remarks:       { type: Sequelize.TEXT, allowNull: true },         
+      image:         { type: Sequelize.BLOB('long'), allowNull: true }, 
     });
 
     await qi.addConstraint('meter_reading', {
@@ -27,6 +29,7 @@ module.exports = {
       onUpdate: 'NO ACTION',
     });
   },
+
   async down(qi) {
     await qi.removeConstraint('meter_reading', 'reading_meter_id');
     await qi.removeConstraint('meter_reading', 'lastread_date_UNIQUE');

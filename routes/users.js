@@ -1,3 +1,4 @@
+// routes/users.js
 const express = require('express');
 const router = express.Router();
 
@@ -27,6 +28,28 @@ function normalizeArray(v) {
     return v.split(',').map(s => s.trim()).filter(Boolean);
   }
   return [v];
+}
+
+/**
+ * Enforce that when 'admin' is present, it must be the ONLY role.
+ * Returns { ok: true, roles: [...] } on success,
+ * or { ok: false, error: '...' } on policy violation.
+ */
+function enforceAdminExclusivity(inputRoles) {
+  const roles = normalizeArray(inputRoles)
+    .map(x => String(x).toLowerCase())
+    .filter(x => ALLOWED_ROLES.has(x));
+
+  if (roles.includes('admin')) {
+    // admin must be the ONLY role
+    if (roles.length > 1) {
+      return { ok: false, error: "When assigning 'admin', it must be the only role (no multi-role allowed for admin)." };
+    }
+    return { ok: true, roles: ['admin'] };
+  }
+  // non-admin roles can be multiple (dedupe)
+  const deduped = Array.from(new Set(roles));
+  return { ok: true, roles: deduped };
 }
 
 // ---- routes ----
@@ -63,10 +86,10 @@ router.post('/', authorizeRole('admin'), async (req, res) => {
       return res.status(400).json({ error: 'user_password and user_fullname are required' });
     }
 
-    // Validate & normalize arrays
-    const user_roles = normalizeArray(rolesIn)
-      .map(x => String(x).toLowerCase())
-      .filter(x => ALLOWED_ROLES.has(x));
+    // Enforce admin exclusivity rule
+    const roleCheck = enforceAdminExclusivity(rolesIn);
+    if (!roleCheck.ok) return res.status(400).json({ error: roleCheck.error });
+    const user_roles = roleCheck.roles;
 
     const building_ids = normalizeArray(buildingsIn).map(String);
     const utility_role = normalizeArray(utilitiesIn).map(String);
@@ -124,10 +147,10 @@ router.put('/:user_id', authorizeRole('admin'), async (req, res) => {
     if (user_password) user.user_password = await hashPassword(user_password);
 
     if (rolesIn !== undefined) {
-      const roles = normalizeArray(rolesIn)
-        .map(x => String(x).toLowerCase())
-        .filter(x => ALLOWED_ROLES.has(x));
-      user.user_roles = roles;
+      // Enforce admin exclusivity rule on update too
+      const roleCheck = enforceAdminExclusivity(rolesIn);
+      if (!roleCheck.ok) return res.status(400).json({ error: roleCheck.error });
+      user.user_roles = roleCheck.roles;
     }
 
     if (buildingsIn !== undefined) {

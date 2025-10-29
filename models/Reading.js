@@ -1,3 +1,4 @@
+// models/Reading.js
 const { DataTypes } = require('sequelize');
 const sequelize = require('./index');
 
@@ -30,6 +31,14 @@ const Reading = sequelize.define('Reading', {
   },
   updated_by: {
     type: DataTypes.STRING,
+    allowNull: false
+  },
+  remarks: {
+    type: DataTypes.TEXT,          
+    allowNull: true
+  },
+  image: {
+    type: DataTypes.BLOB('long'),  
     allowNull: false
   }
 }, {
