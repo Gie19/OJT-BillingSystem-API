@@ -10,8 +10,8 @@ module.exports = {
       lastread_date: { type: Sequelize.DATEONLY, allowNull: false },
       last_updated:  { type: Sequelize.DATE, allowNull: false },
       updated_by:    { type: Sequelize.STRING(30), allowNull: false },
-      remarks:       { type: Sequelize.TEXT, allowNull: true },         
-      image:         { type: Sequelize.BLOB('long'), allowNull: true }, 
+      remarks:       { type: Sequelize.STRING(300), allowNull: true },         
+      image:         { type: Sequelize.TEXT, allowNull: false }, 
     });
 
     await qi.addConstraint('meter_reading', {
