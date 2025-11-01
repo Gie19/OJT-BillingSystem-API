@@ -13,7 +13,7 @@ const Reading  = require('../models/Reading');
 const Meter    = require('../models/Meter');
 const Stall    = require('../models/Stall');
 const Building = require('../models/Building');
-const Tenant   = require('../models/Tenant'); // <-- needed for per-tenant route
+const Tenant   = require('../models/Tenant'); // used in tenant/building routes
 
 /* =========================
  * Middleware
@@ -213,7 +213,7 @@ async function computeROCForMeter({ meterId, endDate, user }) {
 
   const stall = await Stall.findOne({
     where: { stall_id: meter.stall_id },
-    attributes: ['stall_id', 'building_id'],
+    attributes: ['stall_id', 'building_id', 'tenant_id'],
     raw: true
   });
   if (!stall) { const err = new Error('Stall not found for this meter'); err.status = 404; throw err; }
@@ -266,7 +266,8 @@ async function computeROCForMeter({ meterId, endDate, user }) {
 
   return {
     meter_id: meter.meter_id,
-    stall_id: stall.stall_id,                 // <-- include stall
+    stall_id: stall.stall_id,
+    tenant_id: stall.tenant_id || null,
     building_id: stall.building_id,
     meter_type: String(meter.meter_type || '').toLowerCase(),
     period: {
@@ -309,7 +310,7 @@ router.get(
 );
 
 /**
- * NEW: Per-tenant ROC across all meters (shows per-meter with stall)
+ * Per-tenant ROC across all meters (shows per-meter with stall)
  * GET /rateofchange/tenants/:tenant_id/period-end/:endDate
  * Roles: admin, operator, biller (add 'reader' if you want)
  */
@@ -359,7 +360,7 @@ router.get(
       for (const m of meters) {
         try {
           const r = await computeROCForMeter({ meterId: m.meter_id, endDate, user: req.user });
-          results.push(r); // includes stall_id in the return
+          results.push(r); // includes stall_id & tenant_id in the return
         } catch (e) {
           results.push({
             meter_id: m.meter_id,
@@ -382,6 +383,143 @@ router.get(
       });
     } catch (err) {
       sendErr(res, err, 'Rate-of-change (tenant) error');
+    }
+  }
+);
+
+/**
+ * NEW: Per-building ROC grouped by tenant
+ * GET /rateofchange/buildings/:building_id/period-end/:endDate
+ * Body/Query: none
+ * Roles: admin, operator, biller (add 'reader' if you want)
+ *
+ * Output shape:
+ * {
+ *   building_id,
+ *   period: { current, previous },  // display windows
+ *   tenants: [
+ *     {
+ *       tenant_id,
+ *       tenant_name,                // when available
+ *       meters: [                   // per meter under this tenant in the building
+ *         { meter_id, stall_id, meter_type, period, indices, current_consumption, previous_consumption, rate_of_change }
+ *       ],
+ *       totals: { current_consumption, previous_consumption, rate_of_change }
+ *     }, ...
+ *   ]
+ * }
+ */
+router.get(
+  '/buildings/:building_id/period-end/:endDate',
+  authorizeRole('admin', 'operator', 'biller'),
+  async (req, res) => {
+    try {
+      const { building_id, endDate } = req.params;
+      if (!isYMD(endDate)) {
+        return res.status(400).json({ error: 'Invalid endDate. Use YYYY-MM-DD.' });
+      }
+
+      // Scope check for non-admins: requested building must be in their list
+      if (!isAdmin(req.user)) {
+        const allowed = userBuildings(req.user);
+        if (!allowed.includes(String(building_id))) {
+          return res.status(403).json({ error: 'No access to this building' });
+        }
+      }
+
+      // Confirm building exists (optional but nice)
+      const building = await Building.findOne({
+        where: { building_id },
+        attributes: ['building_id', 'building_name'],
+        raw: true
+      });
+      if (!building) {
+        return res.status(404).json({ error: 'Building not found' });
+      }
+
+      // All stalls in this building
+      const stalls = await Stall.findAll({
+        where: { building_id },
+        attributes: ['stall_id', 'tenant_id', 'building_id'],
+        raw: true
+      });
+      if (!stalls.length) {
+        return res.status(404).json({ error: 'No stalls found for this building' });
+      }
+
+      // Group stall_ids by tenant_id
+      const byTenant = new Map();
+      for (const st of stalls) {
+        const tId = st.tenant_id || 'UNASSIGNED';
+        if (!byTenant.has(tId)) byTenant.set(tId, []);
+        byTenant.get(tId).push(st.stall_id);
+      }
+
+      // Load tenant names (where tenant_id not null)
+      const validTenantIds = Array.from(byTenant.keys()).filter(id => id !== 'UNASSIGNED');
+      const tenantsInfo = validTenantIds.length
+        ? await Tenant.findAll({
+            where: { tenant_id: { [Op.in]: validTenantIds } },
+            attributes: ['tenant_id', 'tenant_name'],
+            raw: true
+          })
+        : [];
+      const nameById = new Map(tenantsInfo.map(t => [String(t.tenant_id), t.tenant_name]));
+
+      // For each tenant group, fetch meters under those stalls
+      const tenantsOut = [];
+      for (const [tenant_id, stallIds] of byTenant.entries()) {
+        const meters = await Meter.findAll({
+          where: { stall_id: { [Op.in]: stallIds } },
+          attributes: ['meter_id', 'stall_id'],
+          raw: true
+        });
+
+        const perMeter = [];
+        for (const m of meters) {
+          try {
+            const r = await computeROCForMeter({ meterId: m.meter_id, endDate, user: req.user });
+            perMeter.push(r); // includes stall_id, tenant_id, meter_type, consumptions, etc.
+          } catch (e) {
+            perMeter.push({
+              meter_id: m.meter_id,
+              stall_id: m.stall_id,
+              error: (e && e.message) || 'Failed to compute rate of change'
+            });
+          }
+        }
+
+        // Totals per tenant
+        const aggCurrent  = perMeter.reduce((a, r) => a + (Number(r.current_consumption)  || 0), 0);
+        const aggPrevious = perMeter.reduce((a, r) => a + (Number(r.previous_consumption) || 0), 0);
+        const rate = aggPrevious > 0 ? Math.ceil(((aggCurrent - aggPrevious) / aggPrevious) * 100) : null;
+
+        tenantsOut.push({
+          tenant_id: tenant_id === 'UNASSIGNED' ? null : tenant_id,
+          tenant_name: tenant_id === 'UNASSIGNED' ? null : (nameById.get(String(tenant_id)) || null),
+          meters: perMeter,
+          totals: {
+            current_consumption: round(aggCurrent),
+            previous_consumption: round(aggPrevious),
+            rate_of_change: rate
+          }
+        });
+      }
+
+      // Overall display periods for the response header
+      const display = getDisplayRollingPeriods(endDate);
+
+      return res.json({
+        building_id,
+        building_name: building.building_name || null,
+        period: {
+          current:  display.curr,
+          previous: display.prev
+        },
+        tenants: tenantsOut
+      });
+    } catch (err) {
+      sendErr(res, err, 'Rate-of-change (building) error');
     }
   }
 );
