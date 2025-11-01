@@ -3,7 +3,6 @@
 
 const express = require('express');
 const router = express.Router();
-
 const { Op } = require('sequelize');
 
 const authenticateToken = require('../middleware/authenticateToken');
@@ -19,6 +18,19 @@ const Building = require('../models/Building');
  * Middleware
  * ========================= */
 router.use(authenticateToken);
+
+/* =========================
+ * Error helper
+ * ========================= */
+function sendErr(res, err, context = 'ROC error') {
+  const status = (err && err.status) || 500;
+  const msg =
+    (typeof err?.message === 'string' && err.message.trim()) ? err.message :
+    (typeof err === 'string' && err.trim()) ? err :
+    'Internal Server Error';
+  console.error(`${context}:`, err?.stack || err);
+  return res.status(status).json({ error: msg });
+}
 
 /* =========================
  * Local helpers (no DB)
@@ -41,23 +53,79 @@ function ymd(d) {
   return `${y}-${m}-${day}`;
 }
 
-// month window based on an arbitrary endDate (YYYY-MM-DD)
+function isYMD(s) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s)); }
+
+/**
+ * HYBRID period calculator (used for computations to match Excel math):
+ *  - Current window: 1st day of end month .. endDate (inclusive)
+ *  - Previous window: full previous calendar month
+ *  - Pre-previous window: full month before previous
+ */
 function getPeriodStrings(endDateStr) {
+  if (!isYMD(endDateStr)) {
+    const err = new Error('Invalid end_date format. Use YYYY-MM-DD.');
+    err.status = 400;
+    throw err;
+  }
+
   const end = new Date(endDateStr + 'T00:00:00Z');
-  const currStart = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
-  const nextMonthStart = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() + 1, 1));
-  const currEnd = new Date(nextMonthStart.getTime() - 24 * 60 * 60 * 1000);
 
-  const prevStart = new Date(Date.UTC(currStart.getUTCFullYear(), currStart.getUTCMonth() - 1, 1));
-  const prevEnd = new Date(currStart.getTime() - 24 * 60 * 60 * 1000);
+  const firstOfMonth = (y, m) => new Date(Date.UTC(y, m, 1));
+  const lastOfMonth  = (y, m) => new Date(Date.UTC(y, m + 1, 1) - 24 * 60 * 60 * 1000);
 
-  const prePrevStart = new Date(Date.UTC(prevStart.getUTCFullYear(), prevStart.getUTCMonth() - 1, 1));
-  const prePrevEnd = new Date(prevStart.getTime() - 24 * 60 * 60 * 1000);
+  const y = end.getUTCFullYear();
+  const m = end.getUTCMonth();
+
+  // Current: 1st of end-month .. endDate
+  const currStart = firstOfMonth(y, m);
+  const currEnd   = end;
+
+  // Previous: full previous month
+  const prevYear  = (m === 0) ? y - 1 : y;
+  const prevMonth = (m === 0) ? 11 : m - 1;
+  const prevStart = firstOfMonth(prevYear, prevMonth);
+  const prevEnd   = lastOfMonth(prevYear, prevMonth);
+
+  // Pre-previous: full month before previous
+  const pprevYear  = (prevMonth === 0) ? prevYear - 1 : prevYear;
+  const pprevMonth = (prevMonth === 0) ? 11 : prevMonth - 1;
+  const prePrevStart = firstOfMonth(pprevYear, pprevMonth);
+  const prePrevEnd   = lastOfMonth(pprevYear, pprevMonth);
 
   return {
-    curr:   { start: ymd(currStart),   end: ymd(currEnd) },
-    prev:   { start: ymd(prevStart),   end: ymd(prevEnd) },
-    preprev:{ start: ymd(prePrevStart),end: ymd(prePrevEnd) },
+    curr:    { start: ymd(currStart),    end: ymd(currEnd) },
+    prev:    { start: ymd(prevStart),    end: ymd(prevEnd) },
+    preprev: { start: ymd(prePrevStart), end: ymd(prePrevEnd) },
+  };
+}
+
+/**
+ * DISPLAY-ONLY rolling periods (for the JSON output):
+ *  - Current: end_date - 30 days .. end_date (inclusive)
+ *  - Previous: the 31-day block immediately before current
+ */
+function getDisplayRollingPeriods(endDateStr, windowDays = 31) {
+  if (!isYMD(endDateStr)) {
+    const err = new Error('Invalid end_date format. Use YYYY-MM-DD.');
+    err.status = 400;
+    throw err;
+  }
+  const end = new Date(endDateStr + 'T00:00:00Z');
+  const addDays = (d, n) => {
+    const t = new Date(d.getTime());
+    t.setUTCDate(t.getUTCDate() + n);
+    return t;
+  };
+
+  const currEnd   = end;
+  const currStart = addDays(end, -(windowDays - 1));
+
+  const prevEnd   = addDays(currStart, -1);
+  const prevStart = addDays(prevEnd, -(windowDays - 1));
+
+  return {
+    curr: { start: ymd(currStart), end: ymd(currEnd) },
+    prev: { start: ymd(prevStart), end: ymd(prevEnd) }
   };
 }
 
@@ -82,7 +150,34 @@ function computeUnitsOnly(meterType, meterMult, building, prevIdx, currIdx) {
     // Use hardcoded minimum for LPG
     return round(raw > 0 ? raw : LPG_MIN_CON);
   }
-  throw new Error(`Unsupported meter type: ${t}`);
+  throw Object.assign(new Error(`Unsupported meter type: ${t}`), { status: 400 });
+}
+
+/* =========================
+ * Auth scope helpers (arrays-aware, admin bypass)
+ * ========================= */
+function isAdmin(user) {
+  const roles = Array.isArray(user?.user_roles)
+    ? user.user_roles.map(r => String(r || '').toLowerCase())
+    : (user?.user_level ? [String(user.user_level).toLowerCase()] : []);
+  return roles.includes('admin');
+}
+
+function userBuildings(user) {
+  const arr = Array.isArray(user?.building_ids) ? user.building_ids : [];
+  const single = user?.building_id ? [user.building_id] : [];
+  return Array.from(new Set([...arr, ...single].map(String)));
+}
+
+function enforceScopeOrThrow(user, stall) {
+  if (isAdmin(user)) return;
+  const buildings = userBuildings(user);
+  if (!buildings.length) {
+    throw Object.assign(new Error('Unauthorized: No buildings assigned'), { status: 401 });
+  }
+  if (!buildings.includes(String(stall.building_id))) {
+    throw Object.assign(new Error('No access to this meter'), { status: 403 });
+  }
 }
 
 /* =========================
@@ -122,13 +217,8 @@ async function computeROCForMeter({ meterId, endDate, user }) {
   });
   if (!stall) { const err = new Error('Stall not found for this meter'); err.status = 404; throw err; }
 
-  // scope guard for non-admins
-  const lvl = (user?.user_level || '').toLowerCase();
-  if (lvl !== 'admin') {
-    const userBldg = user?.building_id;
-    if (!userBldg) { const err = new Error('Unauthorized: No building assigned'); err.status = 401; throw err; }
-    if (stall.building_id !== userBldg) { const err = new Error('No access to this meter'); err.status = 403; throw err; }
-  }
+  // scope guard (arrays-aware)
+  enforceScopeOrThrow(user, stall);
 
   // Only need electric & water mins from DB (LPG min is hardcoded)
   const building = await Building.findOne({
@@ -138,10 +228,13 @@ async function computeROCForMeter({ meterId, endDate, user }) {
   });
   if (!building) { const err = new Error('Building configuration not found'); err.status = 400; throw err; }
 
+  // HYBRID periods for computation
   const periods = getPeriodStrings(endDate);
+
+  // Max indices in each window
   const [currMax, prevMax, prePrevMax] = await Promise.all([
-    getMaxReadingInPeriod(meterId, periods.curr.start, periods.curr.end),
-    getMaxReadingInPeriod(meterId, periods.prev.start, periods.prev.end),
+    getMaxReadingInPeriod(meterId, periods.curr.start,    periods.curr.end),
+    getMaxReadingInPeriod(meterId, periods.prev.start,    periods.prev.end),
     getMaxReadingInPeriod(meterId, periods.preprev.start, periods.preprev.end),
   ]);
 
@@ -153,6 +246,9 @@ async function computeROCForMeter({ meterId, endDate, user }) {
     throw err;
   }
 
+  // Excel logic:
+  // Previous Consumed = (Max prev month - Max pre-previous month) * mult
+  // Current  Consumed = (Max current window - Max prev month) * mult
   const unitsNow = computeUnitsOnly(meter.meter_type, meter.meter_mult, building, prevMax.value, currMax.value);
 
   let unitsPrev = null;
@@ -164,13 +260,16 @@ async function computeROCForMeter({ meterId, endDate, user }) {
     }
   }
 
+  // DISPLAY rolling windows for the JSON output
+  const display = getDisplayRollingPeriods(endDate);
+
   return {
     meter_id: meter.meter_id,
     meter_type: String(meter.meter_type || '').toLowerCase(),
     building_id: stall.building_id,
     period: {
-      current: { start: periods.curr.start, end: periods.curr.end },
-      previous: { start: periods.prev.start, end: periods.prev.end }
+      current:  { start: display.curr.start,  end: display.curr.end },
+      previous: { start: display.prev.start,  end: display.prev.end }
     },
     indices: {
       prev_index: round(prevMax.value, 2),
@@ -196,109 +295,16 @@ router.get(
   async (req, res) => {
     try {
       const { meter_id, endDate } = req.params;
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+      if (!isYMD(endDate)) {
         return res.status(400).json({ error: 'Invalid endDate. Use YYYY-MM-DD.' });
       }
       const result = await computeROCForMeter({ meterId: meter_id, endDate, user: req.user });
       return res.json(result);
     } catch (err) {
-      console.error('Rate-of-change (meter) error:', err);
-      res.status(err.status || 500).json({ error: err.message });
+      sendErr(res, err, 'Rate-of-change (meter) error');
     }
   }
 );
 
-/**
- * GET /rateofchange/tenants/:tenant_id/period-end/:endDate
- * Aggregates all meters for a tenant (scoped to user building if non-admin).
- */
-router.get(
-  '/tenants/:tenant_id/period-end/:endDate',
-  authorizeRole('admin', 'operator', 'biller'),
-  async (req, res) => {
-    try {
-      const { tenant_id, endDate } = req.params;
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
-        return res.status(400).json({ error: 'Invalid endDate. Use YYYY-MM-DD.' });
-      }
-
-      // Stalls for tenant (then scope to user building if needed)
-      const stalls = await Stall.findAll({
-        where: { tenant_id },
-        attributes: ['stall_id', 'building_id'],
-        raw: true
-      });
-      if (!stalls.length) return res.status(404).json({ error: 'No stalls found for this tenant' });
-
-      const lvl = (req.user?.user_level || '').toLowerCase();
-      const scopedStalls = (lvl === 'admin')
-        ? stalls
-        : stalls.filter(s => s.building_id === req.user?.building_id);
-
-      if (!scopedStalls.length) {
-        return res.status(403).json({ error: 'No accessible stalls in your building' });
-      }
-
-      const stallIds = scopedStalls.map(s => s.stall_id);
-      const meters = await Meter.findAll({
-        where: { stall_id: { [Op.in]: stallIds } },
-        attributes: ['meter_id'],
-        raw: true
-      });
-      if (!meters.length) return res.status(404).json({ error: 'No meters for this tenant (in your scope)' });
-
-      // Compute per meter
-      const perMeter = [];
-      for (const m of meters) {
-        try {
-          const r = await computeROCForMeter({ meterId: m.meter_id, endDate, user: req.user });
-          perMeter.push(r);
-        } catch (innerErr) {
-          perMeter.push({ meter_id: m.meter_id, error: innerErr.message || 'Failed to compute consumption' });
-        }
-      }
-
-      // Aggregate by type + overall
-      const byType = {};
-      let aggCurrent = 0;
-      let aggPrevious = 0;
-
-      for (const r of perMeter) {
-        if (r.error) continue;
-        const t = r.meter_type;
-        if (!byType[t]) byType[t] = { current_consumption: 0, previous_consumption: 0, meters: 0 };
-        byType[t].current_consumption  += Number(r.current_consumption) || 0;
-        byType[t].previous_consumption += Number(r.previous_consumption) || 0;
-        byType[t].meters += 1;
-
-        aggCurrent  += Number(r.current_consumption) || 0;
-        aggPrevious += Number(r.previous_consumption) || 0;
-      }
-
-      Object.keys(byType).forEach(k => {
-        byType[k].current_consumption  = round(byType[k].current_consumption);
-        byType[k].previous_consumption = round(byType[k].previous_consumption);
-      });
-
-      const overall_rate_of_change =
-        aggPrevious > 0 ? Math.ceil(((aggCurrent - aggPrevious) / aggPrevious) * 100) : null;
-
-      return res.json({
-        tenant_id,
-        end_date: endDate,
-        meters: perMeter,
-        consumption_by_type: byType,
-        totals: {
-          current_consumption: round(aggCurrent),
-          previous_consumption: round(aggPrevious),
-          rate_of_change: overall_rate_of_change
-        }
-      });
-    } catch (err) {
-      console.error('Rate-of-change (tenant) error:', err);
-      res.status(err.status || 500).json({ error: err.message });
-    }
-  }
-);
 
 module.exports = router;
