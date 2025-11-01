@@ -7,13 +7,19 @@ const { Op } = require('sequelize');
 
 const authenticateToken = require('../middleware/authenticateToken');
 const authorizeRole     = require('../middleware/authorizeRole');
+const authorizeUtilityRole = require('../middleware/authorizeUtilityRole');
+const {
+  authorizeBuildingParam,
+  enforceRecordBuilding,
+  attachBuildingScope
+} = require('../middleware/authorizeBuilding');
 
 // Models
 const Reading  = require('../models/Reading');
 const Meter    = require('../models/Meter');
 const Stall    = require('../models/Stall');
 const Building = require('../models/Building');
-const Tenant   = require('../models/Tenant'); // used in tenant/building routes
+const Tenant   = require('../models/Tenant');
 
 /* =========================
  * Middleware
@@ -130,7 +136,17 @@ function getDisplayRollingPeriods(endDateStr, windowDays = 31) {
   };
 }
 
-// unified consumption rule for all utilities
+// Resolve building_id for requested meter (used by enforceRecordBuilding)
+async function getBuildingIdForRequest(req) {
+  const meterId = req.params?.meter_id || req.params?.id || req.body?.meter_id;
+  if (!meterId) return null;
+  const meter = await Meter.findOne({ where: { meter_id: meterId }, attributes: ['stall_id'], raw: true });
+  if (!meter) return null;
+  const stall = await Stall.findOne({ where: { stall_id: meter.stall_id }, attributes: ['building_id'], raw: true });
+  return stall?.building_id || null;
+}
+
+// unified consumption rule for all utilities (Excel logic)
 function computeUnitsOnly(meterType, meterMult, building, prevIdx, currIdx) {
   const t = String(meterType || '').toLowerCase();
   const mult = Number(meterMult) || 1;
@@ -155,33 +171,6 @@ function computeUnitsOnly(meterType, meterMult, building, prevIdx, currIdx) {
 }
 
 /* =========================
- * Auth scope helpers (arrays-aware, admin bypass)
- * ========================= */
-function isAdmin(user) {
-  const roles = Array.isArray(user?.user_roles)
-    ? user.user_roles.map(r => String(r || '').toLowerCase())
-    : (user?.user_level ? [String(user.user_level).toLowerCase()] : []);
-  return roles.includes('admin');
-}
-
-function userBuildings(user) {
-  const arr = Array.isArray(user?.building_ids) ? user.building_ids : [];
-  const single = user?.building_id ? [user.building_id] : [];
-  return Array.from(new Set([...arr, ...single].map(String)));
-}
-
-function enforceScopeOrThrow(user, stall) {
-  if (isAdmin(user)) return;
-  const buildings = userBuildings(user);
-  if (!buildings.length) {
-    throw Object.assign(new Error('Unauthorized: No buildings assigned'), { status: 401 });
-  }
-  if (!buildings.includes(String(stall.building_id))) {
-    throw Object.assign(new Error('No access to this meter'), { status: 403 });
-  }
-}
-
-/* =========================
  * DB helpers
  * ========================= */
 
@@ -199,10 +188,10 @@ async function getMaxReadingInPeriod(meter_id, startStr, endStr) {
 }
 
 /* =========================
- * Core computation
+ * Core computation (no scope checks here; middlewares handle it)
  * ========================= */
 
-async function computeROCForMeter({ meterId, endDate, user }) {
+async function computeROCForMeter({ meterId, endDate }) {
   // Meter → Stall → Building
   const meter = await Meter.findOne({
     where: { meter_id: meterId },
@@ -213,23 +202,18 @@ async function computeROCForMeter({ meterId, endDate, user }) {
 
   const stall = await Stall.findOne({
     where: { stall_id: meter.stall_id },
-    attributes: ['stall_id', 'building_id', 'tenant_id'],
+    attributes: ['stall_id', 'tenant_id', 'building_id'],
     raw: true
   });
   if (!stall) { const err = new Error('Stall not found for this meter'); err.status = 404; throw err; }
 
-  // scope guard (arrays-aware)
-  enforceScopeOrThrow(user, stall);
-
-  // Only need electric & water mins from DB (LPG min is hardcoded)
   const building = await Building.findOne({
     where: { building_id: stall.building_id },
-    attributes: ['building_id','emin_con','wmin_con'],
+    attributes: ['building_id', 'emin_con', 'wmin_con'],
     raw: true
   });
   if (!building) { const err = new Error('Building configuration not found'); err.status = 400; throw err; }
 
-  // HYBRID periods for computation
   const periods = getPeriodStrings(endDate);
 
   // Max indices in each window
@@ -285,23 +269,26 @@ async function computeROCForMeter({ meterId, endDate, user }) {
 }
 
 /* =========================
- * Routes
+ * Routes (role → utility → building)
  * ========================= */
 
 /**
+ * PER-METER
  * GET /rateofchange/meters/:meter_id/period-end/:endDate
- * endDate format: YYYY-MM-DD (e.g., 2025-02-20)
  */
 router.get(
   '/meters/:meter_id/period-end/:endDate',
-  authorizeRole('admin', 'operator', 'biller'),
+  authorizeRole('admin', 'operator', 'biller', 'reader'),
+  authorizeUtilityRole({ roles: ['operator','biller','reader'] }), // resolves utility + req.requestedBuildingId
+  authorizeBuildingParam(),                                        // blocks cross-building unless admin
+  enforceRecordBuilding(getBuildingIdForRequest),                  // double-check via meter→stall
   async (req, res) => {
     try {
       const { meter_id, endDate } = req.params;
       if (!isYMD(endDate)) {
         return res.status(400).json({ error: 'Invalid endDate. Use YYYY-MM-DD.' });
       }
-      const result = await computeROCForMeter({ meterId: meter_id, endDate, user: req.user });
+      const result = await computeROCForMeter({ meterId: meter_id, endDate });
       return res.json(result);
     } catch (err) {
       sendErr(res, err, 'Rate-of-change (meter) error');
@@ -310,13 +297,17 @@ router.get(
 );
 
 /**
- * Per-tenant ROC across all meters (shows per-meter with stall)
+ * PER-TENANT (lists all meters under the tenant; shows stall per meter)
  * GET /rateofchange/tenants/:tenant_id/period-end/:endDate
- * Roles: admin, operator, biller (add 'reader' if you want)
  */
 router.get(
   '/tenants/:tenant_id/period-end/:endDate',
-  authorizeRole('admin', 'operator', 'biller'),
+  authorizeRole('admin', 'operator', 'biller', 'reader'),
+  authorizeUtilityRole({
+    roles: ['operator','biller','reader'],
+    anyOf: ['electric','water','lpg'], // at least one utility permitted
+  }),
+  attachBuildingScope(), // provides req.restrictToBuildingIds and req.buildingWhere(key)
   async (req, res) => {
     try {
       const { tenant_id, endDate } = req.params;
@@ -324,62 +315,46 @@ router.get(
         return res.status(400).json({ error: 'Invalid endDate. Use YYYY-MM-DD.' });
       }
 
-      // Find stalls for tenant
+      // Stalls in scope (tenant & buildings)
       const stalls = await Stall.findAll({
-        where: { tenant_id },
+        where: {
+          tenant_id,
+          ...req.buildingWhere('building_id'),
+        },
         attributes: ['stall_id', 'building_id'],
         raw: true
       });
       if (!stalls.length) {
-        return res.status(404).json({ error: 'No stalls found for this tenant' });
+        return res.status(404).json({ error: 'No accessible stalls found for this tenant' });
       }
 
-      // Scope: filter stalls for non-admins
-      const allowed = isAdmin(req.user)
-        ? stalls
-        : stalls.filter(s => userBuildings(req.user).includes(String(s.building_id)));
-
-      if (!allowed.length) {
-        return res.status(403).json({ error: 'No accessible stalls in your assigned buildings' });
-      }
-
-      const stallIds = allowed.map(s => s.stall_id);
-
-      // Meters under those stalls
+      const stallIds = stalls.map(s => s.stall_id);
       const meters = await Meter.findAll({
         where: { stall_id: { [Op.in]: stallIds } },
-        attributes: ['meter_id', 'stall_id'],
+        attributes: ['meter_id'],
         raw: true
       });
       if (!meters.length) {
         return res.status(404).json({ error: 'No meters found for this tenant (within your scope)' });
       }
 
-      // Compute per meter using the same function
-      const results = [];
+      const perMeter = [];
       for (const m of meters) {
         try {
-          const r = await computeROCForMeter({ meterId: m.meter_id, endDate, user: req.user });
-          results.push(r); // includes stall_id & tenant_id in the return
+          perMeter.push(await computeROCForMeter({ meterId: m.meter_id, endDate }));
         } catch (e) {
-          results.push({
+          perMeter.push({
             meter_id: m.meter_id,
-            stall_id: m.stall_id,
             error: (e && e.message) || 'Failed to compute rate of change'
           });
         }
       }
 
-      // Overall display periods
       const display = getDisplayRollingPeriods(endDate);
-
       return res.json({
         tenant_id,
-        period: {
-          current:  display.curr,
-          previous: display.prev
-        },
-        meters: results
+        period: { current: display.curr, previous: display.prev },
+        meters: perMeter
       });
     } catch (err) {
       sendErr(res, err, 'Rate-of-change (tenant) error');
@@ -388,30 +363,17 @@ router.get(
 );
 
 /**
- * NEW: Per-building ROC grouped by tenant
+ * PER-BUILDING grouped by tenant
  * GET /rateofchange/buildings/:building_id/period-end/:endDate
- * Body/Query: none
- * Roles: admin, operator, biller (add 'reader' if you want)
- *
- * Output shape:
- * {
- *   building_id,
- *   period: { current, previous },  // display windows
- *   tenants: [
- *     {
- *       tenant_id,
- *       tenant_name,                // when available
- *       meters: [                   // per meter under this tenant in the building
- *         { meter_id, stall_id, meter_type, period, indices, current_consumption, previous_consumption, rate_of_change }
- *       ],
- *       totals: { current_consumption, previous_consumption, rate_of_change }
- *     }, ...
- *   ]
- * }
  */
 router.get(
   '/buildings/:building_id/period-end/:endDate',
-  authorizeRole('admin', 'operator', 'biller'),
+  authorizeRole('admin', 'operator', 'biller', 'reader'),
+  authorizeUtilityRole({
+    roles: ['operator','biller','reader'],
+    anyOf: ['electric','water','lpg'],
+  }),
+  authorizeBuildingParam(), // checks :building_id against caller’s building_ids (unless admin)
   async (req, res) => {
     try {
       const { building_id, endDate } = req.params;
@@ -419,28 +381,17 @@ router.get(
         return res.status(400).json({ error: 'Invalid endDate. Use YYYY-MM-DD.' });
       }
 
-      // Scope check for non-admins: requested building must be in their list
-      if (!isAdmin(req.user)) {
-        const allowed = userBuildings(req.user);
-        if (!allowed.includes(String(building_id))) {
-          return res.status(403).json({ error: 'No access to this building' });
-        }
-      }
-
-      // Confirm building exists (optional but nice)
       const building = await Building.findOne({
         where: { building_id },
         attributes: ['building_id', 'building_name'],
         raw: true
       });
-      if (!building) {
-        return res.status(404).json({ error: 'Building not found' });
-      }
+      if (!building) return res.status(404).json({ error: 'Building not found' });
 
       // All stalls in this building
       const stalls = await Stall.findAll({
         where: { building_id },
-        attributes: ['stall_id', 'tenant_id', 'building_id'],
+        attributes: ['stall_id', 'tenant_id'],
         raw: true
       });
       if (!stalls.length) {
@@ -455,48 +406,33 @@ router.get(
         byTenant.get(tId).push(st.stall_id);
       }
 
-      // Load tenant names (where tenant_id not null)
-      const validTenantIds = Array.from(byTenant.keys()).filter(id => id !== 'UNASSIGNED');
-      const tenantsInfo = validTenantIds.length
-        ? await Tenant.findAll({
-            where: { tenant_id: { [Op.in]: validTenantIds } },
-            attributes: ['tenant_id', 'tenant_name'],
-            raw: true
-          })
-        : [];
-      const nameById = new Map(tenantsInfo.map(t => [String(t.tenant_id), t.tenant_name]));
-
-      // For each tenant group, fetch meters under those stalls
+      // Load meters per tenant group
       const tenantsOut = [];
       for (const [tenant_id, stallIds] of byTenant.entries()) {
         const meters = await Meter.findAll({
           where: { stall_id: { [Op.in]: stallIds } },
-          attributes: ['meter_id', 'stall_id'],
+          attributes: ['meter_id'],
           raw: true
         });
 
         const perMeter = [];
         for (const m of meters) {
           try {
-            const r = await computeROCForMeter({ meterId: m.meter_id, endDate, user: req.user });
-            perMeter.push(r); // includes stall_id, tenant_id, meter_type, consumptions, etc.
+            perMeter.push(await computeROCForMeter({ meterId: m.meter_id, endDate }));
           } catch (e) {
             perMeter.push({
               meter_id: m.meter_id,
-              stall_id: m.stall_id,
               error: (e && e.message) || 'Failed to compute rate of change'
             });
           }
         }
 
-        // Totals per tenant
         const aggCurrent  = perMeter.reduce((a, r) => a + (Number(r.current_consumption)  || 0), 0);
         const aggPrevious = perMeter.reduce((a, r) => a + (Number(r.previous_consumption) || 0), 0);
         const rate = aggPrevious > 0 ? Math.ceil(((aggCurrent - aggPrevious) / aggPrevious) * 100) : null;
 
         tenantsOut.push({
           tenant_id: tenant_id === 'UNASSIGNED' ? null : tenant_id,
-          tenant_name: tenant_id === 'UNASSIGNED' ? null : (nameById.get(String(tenant_id)) || null),
           meters: perMeter,
           totals: {
             current_consumption: round(aggCurrent),
@@ -506,16 +442,11 @@ router.get(
         });
       }
 
-      // Overall display periods for the response header
       const display = getDisplayRollingPeriods(endDate);
-
       return res.json({
         building_id,
         building_name: building.building_name || null,
-        period: {
-          current:  display.curr,
-          previous: display.prev
-        },
+        period: { current: display.curr, previous: display.prev },
         tenants: tenantsOut
       });
     } catch (err) {

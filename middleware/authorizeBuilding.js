@@ -1,37 +1,40 @@
 // middleware/authorizeBuilding.js
+'use strict';
 
-// Helpers
-const isAdmin = (req) => {
-  const roles = Array.isArray(req.user?.user_roles) ? req.user.user_roles : [];
-  return roles.map(x => String(x || '').toLowerCase()).includes('admin');
-};
+const { Op } = require('sequelize');
 
-const getUserBuildings = (req) => {
-  const b = req.user?.building_ids;
-  return Array.isArray(b) ? b : [];
-};
+function isAdmin(user) {
+  const roles = Array.isArray(user?.user_roles) ? user.user_roles.map(r => String(r).toLowerCase()) : [];
+  return roles.includes('admin');
+}
+
+function getUserBuildings(user) {
+  const arr = Array.isArray(user?.building_ids) ? user.building_ids : [];
+  const single = user?.building_id ? [user.building_id] : [];
+  return Array.from(new Set([...arr, ...single].map(String)));
+}
 
 /**
- * If a request *provides* a building_id (body/params/query or req.requestedBuildingId),
- * ensure non-admin users only act within their assigned buildings.
+ * authorizeBuildingParam()
+ * - Uses req.params.building_id if present.
+ * - Otherwise uses req.requestedBuildingId (e.g., set by authorizeUtilityRole from meter).
  */
 function authorizeBuildingParam() {
-  return (req, res, next) => {
-    if (isAdmin(req)) return next();
+  return function (req, res, next) {
+    if (isAdmin(req.user)) return next();
 
-    const buildings = getUserBuildings(req);
-    if (!buildings.length) {
+    const allowed = getUserBuildings(req.user);
+    if (!allowed.length) {
       return res.status(401).json({ error: 'Unauthorized: No buildings assigned' });
     }
 
-    const requested =
-      req.requestedBuildingId ||
-      req.body?.building_id ||
-      req.params?.building_id ||
-      req.query?.building_id;
+    const requested = String(req.params?.building_id || req.requestedBuildingId || '');
+    if (!requested) {
+      return res.status(400).json({ error: 'No building specified for authorization' });
+    }
 
-    if (requested && !buildings.includes(requested)) {
-      return res.status(403).json({ error: 'Forbidden: Building mismatch' });
+    if (!allowed.includes(requested)) {
+      return res.status(403).json({ error: 'No access to this building' });
     }
 
     next();
@@ -39,57 +42,57 @@ function authorizeBuildingParam() {
 }
 
 /**
- * For list/index GETs:
- *  - Admins: no restriction.
- *  - Non-admins: attaches helpers tied to their building_ids:
- *       req.restrictToBuildingIds
- *       req.buildingWhere(key='building_id') -> { [key]: building_ids } or {}
+ * attachBuildingScope()
+ * - Adds:
+ *   - req.restrictToBuildingIds: string[] | null (null for admin = no restriction)
+ *   - req.buildingWhere(key): returns a where clause piece for Sequelize
  */
 function attachBuildingScope() {
-  return (req, _res, next) => {
-    if (isAdmin(req)) {
-      req.restrictToBuildingIds = undefined;
+  return function (req, res, next) {
+    if (isAdmin(req.user)) {
+      req.restrictToBuildingIds = null;
       req.buildingWhere = () => ({});
       return next();
     }
-
-    const buildings = getUserBuildings(req);
-    if (!buildings.length) {
+    const ids = getUserBuildings(req.user);
+    if (!ids.length) {
       return res.status(401).json({ error: 'Unauthorized: No buildings assigned' });
     }
-
-    req.restrictToBuildingIds = buildings;
-    req.buildingWhere = (key = 'building_id') => ({ [key]: buildings });
-
+    req.restrictToBuildingIds = ids;
+    req.buildingWhere = (key) => ({ [key]: { [Op.in]: ids } });
     next();
   };
 }
 
 /**
- * For single-record endpoints where the record’s building is derived indirectly
- * (e.g., Meter -> Stall.building_id).
- * Pass a function that returns a Promise resolving to the record’s building_id (or null).
+ * enforceRecordBuilding(getBuildingIdForRequest)
+ * - For single-record routes where the building is inferred (e.g., from meter_id).
+ * - Calls await getBuildingIdForRequest(req) → building_id, then checks it.
  */
 function enforceRecordBuilding(getBuildingIdForRequest) {
-  return async (req, res, next) => {
-    if (isAdmin(req)) return next();
-
-    const buildings = getUserBuildings(req);
-    if (!buildings.length) {
-      return res.status(401).json({ error: 'Unauthorized: No buildings assigned' });
-    }
-
+  return async function (req, res, next) {
     try {
-      const recordBuildingId = await getBuildingIdForRequest(req);
-      if (!recordBuildingId) return next(); // let route decide 404 vs empty
+      if (isAdmin(req.user)) return next();
 
-      if (!buildings.includes(recordBuildingId)) {
-        return res.status(403).json({ error: 'Forbidden: Resource not in your buildings' });
+      const allowed = getUserBuildings(req.user);
+      if (!allowed.length) {
+        return res.status(401).json({ error: 'Unauthorized: No buildings assigned' });
+        }
+
+      const recordBuildingId = await getBuildingIdForRequest(req);
+      const candidate = String(recordBuildingId || req.requestedBuildingId || '');
+      if (!candidate) {
+        return res.status(400).json({ error: 'Unable to resolve building for this record' });
+      }
+
+      if (!allowed.includes(candidate)) {
+        return res.status(403).json({ error: 'No access to this record’s building' });
       }
 
       next();
     } catch (err) {
-      next(err);
+      console.error('enforceRecordBuilding error:', err);
+      res.status(500).json({ error: 'Building authorization failed' });
     }
   };
 }

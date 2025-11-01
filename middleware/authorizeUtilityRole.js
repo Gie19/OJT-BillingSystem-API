@@ -1,124 +1,95 @@
 // middleware/authorizeUtilityRole.js
+'use strict';
+
 const Meter = require('../models/Meter');
 const Stall = require('../models/Stall');
 
 /**
- * Enforce per-utility access (electric | water | lpg) for selected roles.
+ * authorizeUtilityRole(options)
+ * options:
+ *  - roles: string[]        -> caller must have ANY of these top-level roles (e.g., operator/biller/reader)
+ *  - anyOf: string[]        -> caller must have ANY of these utilities (e.g., ['electric','water','lpg'])
+ *  - requireAll: boolean    -> if true, caller must have ALL in anyOf (default false)
+ *  - meterIdFields: string[]-> where to look for meter id (default: ['params.meter_id','params.id','body.meter_id'])
  *
- * Options:
- *  - roles:        roles this applies to (default ['biller'])
- *  - anyOf:        when no meter is involved, require these utilities
- *  - requireAll:   if true require ALL in anyOf, else ANY one (default true)
- *  - adminBypass:  admins skip the check (default true)
- *  - meterIdFields: dotted paths to search for meter_id (default ['body.meter_id','params.meter_id','params.id'])
- *
- * Behavior:
- *  - If a meter_id is present, resolve meter -> utility (+ stall -> building) and
- *    require the user's utility_role to include that utility. Also sets:
- *      req.meterUtility         (string: 'electric'|'water'|'lpg')
- *      req.requestedBuildingId  (so authorizeBuilding can scope)
- *  - If no meter_id, but anyOf is provided, enforce against that set.
+ * Expects user payload:
+ *  - req.user.user_roles?        : string[] (top-level roles; 'admin' bypasses)
+ *  - req.user.utility_roles?     : string[] of utilities (e.g., ['electric','water'])
  */
-function authorizeUtilityRole(opts = {}) {
+module.exports = function authorizeUtilityRole(opts = {}) {
   const {
-    roles = ['biller'],
-    anyOf = null,
-    requireAll = true,
-    adminBypass = true,
-    meterIdFields = ['body.meter_id', 'params.meter_id', 'params.id'],
+    roles = [],
+    anyOf = [],
+    requireAll = false,
+    meterIdFields = ['params.meter_id', 'params.id', 'body.meter_id'],
   } = opts;
 
-  const ALLOWED = new Set(['electric', 'water', 'lpg']);
-  const ENFORCED_ROLES = roles.map(r => String(r).toLowerCase());
+  function hasAnyRole(user, allowed) {
+    const roles = Array.isArray(user?.user_roles) ? user.user_roles : [];
+    const set = new Set(roles.map(r => String(r).toLowerCase()));
+    return allowed.some(r => set.has(String(r).toLowerCase()));
+  }
 
-  return async (req, res, next) => {
+  function isAdmin(user) {
+    const roles = Array.isArray(user?.user_roles) ? user.user_roles.map(r => String(r).toLowerCase()) : [];
+    return roles.includes('admin');
+  }
+
+  function hasUtilities(user, list, allRequired) {
+    if (!list.length) return true;
+    const u = Array.isArray(user?.utility_roles) ? user.utility_roles.map(s => String(s).toLowerCase()) : [];
+    if (allRequired) return list.every(x => u.includes(String(x).toLowerCase()));
+    return list.some(x => u.includes(String(x).toLowerCase()));
+  }
+
+  async function pickMeterId(req) {
+    for (const path of meterIdFields) {
+      const [root, key] = path.split('.');
+      if (root && key && req[root] && req[root][key]) return req[root][key];
+    }
+    return null;
+  }
+
+  return async function (req, res, next) {
     try {
-      const user = req.user;
-      if (!user) return res.status(401).json({ error: 'Unauthorized' });
+      // Admin bypasses utility checks; role gate still applied earlier by authorizeRole
+      if (isAdmin(req.user)) return next();
 
-      const userRoles = Array.isArray(user.user_roles) ? user.user_roles.map(r => String(r).toLowerCase()) : [];
-
-      // Admin bypass
-      if (adminBypass && userRoles.includes('admin')) return next();
-
-      // If the caller's roles don't intersect the enforced set, skip checks
-      const roleInScope = userRoles.some(r => ENFORCED_ROLES.includes(r));
-      if (!roleInScope) return next();
-
-      // Normalize user's allowed utilities
-      const granted = Array.isArray(user.utility_role)
-        ? user.utility_role.map(x => String(x).toLowerCase())
-        : [];
-
-      if (!granted.every(g => ALLOWED.has(g))) {
-        return res.status(400).json({ error: 'User has invalid utility_role values' });
+      // If high-level roles are required (operator/biller/reader), enforce
+      if (roles.length && !hasAnyRole(req.user, roles)) {
+        return res.status(403).json({ error: 'Insufficient role to access this utility' });
       }
 
-      // 1) Meter-based enforcement
-      let util = (req.meterUtility || '').toLowerCase();
-      if (!util) {
-        const meterId = findFirst(req, meterIdFields);
-        if (meterId) {
-          const meter = await Meter.findOne({
-            where: { meter_id: meterId },
-            attributes: ['meter_type', 'stall_id'],
-          });
-          if (!meter) return res.status(404).json({ error: 'Meter not found' });
+      // If we need a specific utility but none specified yet, try to resolve via meter_id
+      let utility = null;
+      let requestedBuildingId = null;
 
-          util = String(meter.meter_type || '').toLowerCase();
-          if (!ALLOWED.has(util)) {
-            return res.status(400).json({ error: `Unknown meter utility type: ${util}` });
-          }
+      const meterId = await pickMeterId(req);
+      if (meterId) {
+        const meter = await Meter.findOne({ where: { meter_id: meterId }, attributes: ['stall_id', 'meter_type'], raw: true });
+        if (!meter) return res.status(404).json({ error: 'Meter not found for utility check' });
 
-          // also set building for authorizeBuilding
-          const stall = await Stall.findOne({
-            where: { stall_id: meter.stall_id },
-            attributes: ['building_id'],
-          });
-          if (stall?.building_id) req.requestedBuildingId = stall.building_id;
+        const stall = await Stall.findOne({ where: { stall_id: meter.stall_id }, attributes: ['building_id'], raw: true });
+        requestedBuildingId = stall?.building_id || null;
 
-          req.meterUtility = util; // expose downstream
-        }
+        utility = String(meter.meter_type || '').toLowerCase();
+        req.meterUtility = utility;
+        if (requestedBuildingId) req.requestedBuildingId = requestedBuildingId;
       }
 
-      if (util) {
-        if (!granted.includes(util)) {
-          return res.status(403).json({ error: `Forbidden: missing ${util} access` });
-        }
-        return next();
-      }
-
-      // 2) Non-meter endpoints: enforce anyOf (if provided)
-      if (Array.isArray(anyOf) && anyOf.length > 0) {
-        const needed = anyOf.map(x => String(x).toLowerCase());
-        if (!needed.every(n => ALLOWED.has(n))) {
-          return res.status(400).json({ error: 'Middleware misconfigured: invalid anyOf utility' });
-        }
-        const ok = requireAll
-          ? needed.every(n => granted.includes(n))
-          : needed.some(n => granted.includes(n));
-
+      // Enforce utility permission if asked
+      if (anyOf.length) {
+        const need = requireAll ? 'all' : 'any';
+        const ok = hasUtilities(req.user, anyOf, requireAll) || (utility && anyOf.includes(utility));
         if (!ok) {
-          const mode = requireAll ? 'all of' : 'one of';
-          return res.status(403).json({ error: `Forbidden: requires ${mode} [${needed.join(', ')}]` });
+          return res.status(403).json({ error: `Requires ${need} of utilities: ${anyOf.join(', ')}` });
         }
       }
 
-      return next();
+      next();
     } catch (err) {
       console.error('authorizeUtilityRole error:', err);
-      return res.status(500).json({ error: 'Server error' });
+      res.status(500).json({ error: 'Utility authorization failed' });
     }
   };
-}
-
-// helpers
-function findFirst(req, dottedPaths) {
-  for (const p of dottedPaths) {
-    const v = p.split('.').reduce((o, k) => (o && o[k] !== undefined ? o[k] : undefined), req);
-    if (v !== undefined && v !== null && String(v).trim() !== '') return v;
-  }
-  return null;
-}
-
-module.exports = authorizeUtilityRole;
+};
