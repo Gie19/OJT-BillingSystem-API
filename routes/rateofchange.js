@@ -13,6 +13,7 @@ const Reading  = require('../models/Reading');
 const Meter    = require('../models/Meter');
 const Stall    = require('../models/Stall');
 const Building = require('../models/Building');
+const Tenant   = require('../models/Tenant'); // <-- needed for per-tenant route
 
 /* =========================
  * Middleware
@@ -265,8 +266,9 @@ async function computeROCForMeter({ meterId, endDate, user }) {
 
   return {
     meter_id: meter.meter_id,
-    meter_type: String(meter.meter_type || '').toLowerCase(),
+    stall_id: stall.stall_id,                 // <-- include stall
     building_id: stall.building_id,
+    meter_type: String(meter.meter_type || '').toLowerCase(),
     period: {
       current:  { start: display.curr.start,  end: display.curr.end },
       previous: { start: display.prev.start,  end: display.prev.end }
@@ -306,5 +308,82 @@ router.get(
   }
 );
 
+/**
+ * NEW: Per-tenant ROC across all meters (shows per-meter with stall)
+ * GET /rateofchange/tenants/:tenant_id/period-end/:endDate
+ * Roles: admin, operator, biller (add 'reader' if you want)
+ */
+router.get(
+  '/tenants/:tenant_id/period-end/:endDate',
+  authorizeRole('admin', 'operator', 'biller'),
+  async (req, res) => {
+    try {
+      const { tenant_id, endDate } = req.params;
+      if (!isYMD(endDate)) {
+        return res.status(400).json({ error: 'Invalid endDate. Use YYYY-MM-DD.' });
+      }
+
+      // Find stalls for tenant
+      const stalls = await Stall.findAll({
+        where: { tenant_id },
+        attributes: ['stall_id', 'building_id'],
+        raw: true
+      });
+      if (!stalls.length) {
+        return res.status(404).json({ error: 'No stalls found for this tenant' });
+      }
+
+      // Scope: filter stalls for non-admins
+      const allowed = isAdmin(req.user)
+        ? stalls
+        : stalls.filter(s => userBuildings(req.user).includes(String(s.building_id)));
+
+      if (!allowed.length) {
+        return res.status(403).json({ error: 'No accessible stalls in your assigned buildings' });
+      }
+
+      const stallIds = allowed.map(s => s.stall_id);
+
+      // Meters under those stalls
+      const meters = await Meter.findAll({
+        where: { stall_id: { [Op.in]: stallIds } },
+        attributes: ['meter_id', 'stall_id'],
+        raw: true
+      });
+      if (!meters.length) {
+        return res.status(404).json({ error: 'No meters found for this tenant (within your scope)' });
+      }
+
+      // Compute per meter using the same function
+      const results = [];
+      for (const m of meters) {
+        try {
+          const r = await computeROCForMeter({ meterId: m.meter_id, endDate, user: req.user });
+          results.push(r); // includes stall_id in the return
+        } catch (e) {
+          results.push({
+            meter_id: m.meter_id,
+            stall_id: m.stall_id,
+            error: (e && e.message) || 'Failed to compute rate of change'
+          });
+        }
+      }
+
+      // Overall display periods
+      const display = getDisplayRollingPeriods(endDate);
+
+      return res.json({
+        tenant_id,
+        period: {
+          current:  display.curr,
+          previous: display.prev
+        },
+        meters: results
+      });
+    } catch (err) {
+      sendErr(res, err, 'Rate-of-change (tenant) error');
+    }
+  }
+);
 
 module.exports = router;
